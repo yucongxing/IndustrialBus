@@ -1,5 +1,6 @@
 #include "industrial_bus/core/idempotency_journal.h"
 
+#include <algorithm>
 #include <array>
 #include <cerrno>
 #include <chrono>
@@ -23,6 +24,7 @@ namespace {
 constexpr std::uint32_t kMagic = 0x524a4249U;  // "IBJR" in little endian.
 constexpr std::uint16_t kVersion = 1;
 constexpr std::uint16_t kRegistrationRecord = 1;
+constexpr std::uint16_t kStateRecord = 2;
 constexpr std::size_t kHeaderSize = 16;
 constexpr std::uint32_t kMaxRecordSize = 16U * 1024U * 1024U;
 
@@ -221,7 +223,19 @@ std::string sha256(const ByteBuffer& input) {
     return result;
 }
 
-ByteBuffer serializeRecord(const IdempotencyRecord& record) {
+ByteBuffer frameRecord(std::uint16_t type, ByteBuffer payload) {
+    ByteBuffer result;
+    result.reserve(kHeaderSize + payload.size());
+    appendU32(result, kMagic);
+    appendU16(result, kVersion);
+    appendU16(result, type);
+    appendU32(result, static_cast<std::uint32_t>(payload.size()));
+    appendU32(result, crc32(payload));
+    result.insert(result.end(), payload.begin(), payload.end());
+    return result;
+}
+
+ByteBuffer serializeRegistration(const IdempotencyRecord& record) {
     ByteBuffer payload;
     appendU64(payload, static_cast<std::uint64_t>(record.created_at_unix_ns));
     appendU64(payload, static_cast<std::uint64_t>(record.expires_at_unix_ns));
@@ -234,18 +248,10 @@ ByteBuffer serializeRecord(const IdempotencyRecord& record) {
     appendString(payload, record.owner_service);
     appendString(payload, record.owner_instance);
 
-    ByteBuffer result;
-    result.reserve(kHeaderSize + payload.size());
-    appendU32(result, kMagic);
-    appendU16(result, kVersion);
-    appendU16(result, kRegistrationRecord);
-    appendU32(result, static_cast<std::uint32_t>(payload.size()));
-    appendU32(result, crc32(payload));
-    result.insert(result.end(), payload.begin(), payload.end());
-    return result;
+    return frameRecord(kRegistrationRecord, std::move(payload));
 }
 
-Result<IdempotencyRecord> deserializeRecord(const ByteBuffer& payload) {
+Result<IdempotencyRecord> deserializeRegistration(const ByteBuffer& payload) {
     IdempotencyRecord record;
     std::size_t offset = 0;
     std::uint64_t created = 0;
@@ -273,9 +279,102 @@ Result<IdempotencyRecord> deserializeRecord(const ByteBuffer& payload) {
         return Error::protocol("idempotency journal record contains invalid fields");
     }
     record.created_at_unix_ns = static_cast<std::int64_t>(created);
+    record.updated_at_unix_ns = record.created_at_unix_ns;
     record.expires_at_unix_ns = static_cast<std::int64_t>(expires);
     record.state = static_cast<OperationState>(state);
     return record;
+}
+
+struct StateUpdateRecord {
+    CommandIdentity identity;
+    std::string operation_id;
+    OperationState state{OperationState::Unspecified};
+    std::int64_t updated_at_unix_ns{0};
+    std::optional<Error> error;
+};
+
+ByteBuffer serializeStateUpdate(const StateUpdateRecord& update) {
+    ByteBuffer payload;
+    appendU64(payload, static_cast<std::uint64_t>(update.updated_at_unix_ns));
+    appendU32(payload, static_cast<std::uint32_t>(update.state));
+    appendString(payload, update.identity.source_service);
+    appendString(payload, update.identity.command_topic);
+    appendString(payload, update.identity.idempotency_key);
+    appendString(payload, update.operation_id);
+    appendU32(payload, update.error ? 1U : 0U);
+    if (update.error) {
+        appendU32(payload, static_cast<std::uint32_t>(update.error->category));
+        appendU32(payload, static_cast<std::uint32_t>(update.error->code));
+        appendU32(payload, update.error->retryable ? 1U : 0U);
+        appendString(payload, update.error->message);
+        appendString(payload, update.error->operation_id);
+        appendU32(payload, static_cast<std::uint32_t>(update.error->context.size()));
+        for (const auto& item : update.error->context) {
+            appendString(payload, item.first);
+            appendString(payload, item.second);
+        }
+    }
+    return frameRecord(kStateRecord, std::move(payload));
+}
+
+Result<StateUpdateRecord> deserializeStateUpdate(const ByteBuffer& payload) {
+    StateUpdateRecord update;
+    std::size_t offset = 0;
+    std::uint64_t updated = 0;
+    std::uint32_t state = 0;
+    std::uint32_t has_error = 0;
+    if (!readU64(payload, offset, updated) || !readU32(payload, offset, state) ||
+        !readString(payload, offset, update.identity.source_service) ||
+        !readString(payload, offset, update.identity.command_topic) ||
+        !readString(payload, offset, update.identity.idempotency_key) ||
+        !readString(payload, offset, update.operation_id) ||
+        !readU32(payload, offset, has_error) || has_error > 1U) {
+        return Error::protocol("invalid idempotency journal state record");
+    }
+    if (updated > static_cast<std::uint64_t>(INT64_MAX) ||
+        state == static_cast<std::uint32_t>(OperationState::Unspecified) ||
+        state > static_cast<std::uint32_t>(OperationState::Cancelled) ||
+        update.identity.source_service.empty() ||
+        update.identity.command_topic.empty() ||
+        update.identity.idempotency_key.empty() || update.operation_id.empty()) {
+        return Error::protocol("idempotency state record contains invalid fields");
+    }
+    update.updated_at_unix_ns = static_cast<std::int64_t>(updated);
+    update.state = static_cast<OperationState>(state);
+    if (has_error != 0U) {
+        Error error;
+        std::uint32_t category = 0;
+        std::uint32_t code = 0;
+        std::uint32_t retryable = 0;
+        std::uint32_t context_size = 0;
+        if (!readU32(payload, offset, category) || !readU32(payload, offset, code) ||
+            !readU32(payload, offset, retryable) || retryable > 1U ||
+            !readString(payload, offset, error.message) ||
+            !readString(payload, offset, error.operation_id) ||
+            !readU32(payload, offset, context_size) ||
+            category > static_cast<std::uint32_t>(ErrorCategory::ServiceAlreadyRegistered) ||
+            context_size > 1024U) {
+            return Error::protocol("invalid Error in idempotency state record");
+        }
+        error.category = static_cast<ErrorCategory>(category);
+        error.code = static_cast<std::int32_t>(code);
+        error.retryable = retryable != 0U;
+        for (std::uint32_t i = 0; i < context_size; ++i) {
+            std::string key;
+            std::string value;
+            if (!readString(payload, offset, key) ||
+                !readString(payload, offset, value) || key.empty() ||
+                !error.context.emplace(std::move(key), std::move(value)).second) {
+                return Error::protocol("invalid Error context in state record");
+            }
+        }
+        update.error = std::move(error);
+    }
+    if (offset != payload.size() ||
+        (update.error && update.state != OperationState::Failed)) {
+        return Error::protocol("idempotency state record has trailing or invalid data");
+    }
+    return update;
 }
 
 bool sameIdentity(const CommandIdentity& left, const CommandIdentity& right) {
@@ -433,7 +532,8 @@ public:
                 !readU16(header, header_offset, type) ||
                 !readU32(header, header_offset, payload_size) ||
                 !readU32(header, header_offset, checksum) || magic != kMagic ||
-                version != kVersion || type != kRegistrationRecord ||
+                version != kVersion ||
+                (type != kRegistrationRecord && type != kStateRecord) ||
                 payload_size > kMaxRecordSize) {
                 return Error::protocol("unsupported or corrupt idempotency journal header");
             }
@@ -450,16 +550,37 @@ public:
             if (crc32(payload) != checksum) {
                 return Error::protocol("idempotency journal checksum mismatch");
             }
-            auto decoded = deserializeRecord(payload);
-            if (!decoded) {
-                return decoded.error();
-            }
-            auto record = std::move(decoded.value());
-            if (record.expires_at_unix_ns > now) {
-                const auto inserted = records.emplace(record.identity, record);
-                if (!inserted.second) {
-                    return Error::protocol(
-                        "idempotency journal contains overlapping live registrations");
+            if (type == kRegistrationRecord) {
+                auto decoded = deserializeRegistration(payload);
+                if (!decoded) {
+                    return decoded.error();
+                }
+                auto record = std::move(decoded.value());
+                if (record.expires_at_unix_ns > now) {
+                    const auto inserted = records.emplace(record.identity, record);
+                    if (!inserted.second) {
+                        return Error::protocol(
+                            "idempotency journal contains overlapping live registrations");
+                    }
+                }
+            } else {
+                auto decoded = deserializeStateUpdate(payload);
+                if (!decoded) {
+                    return decoded.error();
+                }
+                auto update = std::move(decoded.value());
+                const auto existing = records.find(update.identity);
+                if (existing != records.end() &&
+                    existing->second.operation_id == update.operation_id) {
+                    if (update.updated_at_unix_ns < existing->second.updated_at_unix_ns ||
+                        (update.state != existing->second.state &&
+                         !isValidTransition(existing->second.state, update.state))) {
+                        return Error::protocol(
+                            "idempotency journal contains an invalid state transition");
+                    }
+                    existing->second.state = update.state;
+                    existing->second.updated_at_unix_ns = update.updated_at_unix_ns;
+                    existing->second.error = std::move(update.error);
                 }
             }
             offset += record_size;
@@ -525,7 +646,7 @@ Result<RegistrationDecision> IdempotencyJournal::registerCommand(
         command.identity.command_topic.empty() ||
         command.identity.idempotency_key.empty() || command.operation_id.empty() ||
         command.owner_service.empty() || command.owner_instance.empty() ||
-        command.initial_state == OperationState::Unspecified) {
+        command.initial_state != OperationState::Created) {
         return Error::invalidArgument("command registration is missing required fields");
     }
     const auto digest = sha256(command.payload);
@@ -559,8 +680,9 @@ Result<RegistrationDecision> IdempotencyJournal::registerCommand(
     record.owner_instance = std::move(command.owner_instance);
     record.state = command.initial_state;
     record.created_at_unix_ns = now;
+    record.updated_at_unix_ns = now;
     record.expires_at_unix_ns = now + retention_ns;
-    const auto serialized = serializeRecord(record);
+    const auto serialized = serializeRegistration(record);
     if (serialized.size() - kHeaderSize > kMaxRecordSize) {
         return Error::resourceExhausted("idempotency journal record is too large");
     }
@@ -577,6 +699,63 @@ Result<RegistrationDecision> IdempotencyJournal::registerCommand(
     impl_->file_end += static_cast<off_t>(serialized.size());
     impl_->records.emplace(record.identity, record);
     return RegistrationDecision{std::move(record), false};
+}
+
+Result<IdempotencyRecord> IdempotencyJournal::updateState(
+    const CommandIdentity& identity,
+    const std::string& operation_id,
+    OperationState next,
+    std::optional<Error> error) {
+    if (identity.source_service.empty() || identity.command_topic.empty() ||
+        identity.idempotency_key.empty() || operation_id.empty() ||
+        next == OperationState::Unspecified ||
+        (error && next != OperationState::Failed) ||
+        (next == OperationState::Failed && (!error || !*error))) {
+        return Error::invalidArgument("invalid idempotency state update");
+    }
+    const auto now = unixNowNs();
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto existing = impl_->records.find(identity);
+    if (existing == impl_->records.end() || existing->second.expires_at_unix_ns <= now) {
+        return Error::serviceUnavailable("idempotency record was not found");
+    }
+    if (existing->second.operation_id != operation_id) {
+        return Error::idempotencyConflict(
+            "operation id does not own this idempotency record");
+    }
+    if (existing->second.state == next) {
+        return existing->second;
+    }
+    if (!isValidTransition(existing->second.state, next)) {
+        return Error::invalidArgument("invalid authoritative operation state transition");
+    }
+
+    StateUpdateRecord update;
+    update.identity = identity;
+    update.operation_id = operation_id;
+    update.state = next;
+    update.updated_at_unix_ns =
+        std::max(now, existing->second.updated_at_unix_ns);
+    update.error = std::move(error);
+    const auto serialized = serializeStateUpdate(update);
+    if (serialized.size() - kHeaderSize > kMaxRecordSize) {
+        return Error::resourceExhausted("idempotency state record is too large");
+    }
+    const auto original_end = impl_->file_end;
+    auto written = pwriteExact(impl_->fd, serialized, original_end);
+    if (!written || ::fdatasync(impl_->fd) != 0) {
+        const Error write_error = !written
+                                      ? written.error()
+                                      : ioError("failed to sync idempotency state update");
+        (void)::ftruncate(impl_->fd, original_end);
+        (void)::fdatasync(impl_->fd);
+        return write_error;
+    }
+    impl_->file_end += static_cast<off_t>(serialized.size());
+    existing->second.state = next;
+    existing->second.updated_at_unix_ns = now;
+    existing->second.error = std::move(update.error);
+    return existing->second;
 }
 
 Result<IdempotencyRecord> IdempotencyJournal::find(

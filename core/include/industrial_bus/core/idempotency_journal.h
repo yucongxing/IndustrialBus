@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <string>
 
 namespace industrial_bus::core {
@@ -41,7 +42,9 @@ struct IdempotencyRecord {
     std::string owner_instance;
     OperationState state{OperationState::Created};
     std::int64_t created_at_unix_ns{0};
+    std::int64_t updated_at_unix_ns{0};
     std::int64_t expires_at_unix_ns{0};
+    std::optional<Error> error;
 };
 
 struct RegistrationDecision {
@@ -61,6 +64,10 @@ public:
     IdempotencyJournal& operator=(const IdempotencyJournal&) = delete;
 
     Result<RegistrationDecision> registerCommand(CommandRegistration command);
+    Result<IdempotencyRecord> updateState(const CommandIdentity& identity,
+                                          const std::string& operation_id,
+                                          OperationState next,
+                                          std::optional<Error> error = {});
     Result<IdempotencyRecord> find(const CommandIdentity& identity) const;
     std::size_t liveRecordCount() const;
 

@@ -206,6 +206,29 @@ void testIdempotencyJournal() {
           industrial_bus::ErrorCategory::IdempotencyConflict);
     CHECK(conflict.error().operation_id == "operation-1");
 
+    auto running = journal->updateState(first.identity, "operation-1",
+                                        OperationState::Running);
+    CHECK(running);
+    CHECK(running.value().state == OperationState::Running);
+    auto terminal_error = industrial_bus::Error::internal("algorithm failed", 73);
+    terminal_error.operation_id = "operation-1";
+    terminal_error.context["stage"] = "prepare";
+    auto failed = journal->updateState(first.identity, "operation-1",
+                                       OperationState::Failed, terminal_error);
+    CHECK(failed);
+    CHECK(failed.value().state == OperationState::Failed);
+    CHECK(failed.value().error == terminal_error);
+    auto invalid_transition = journal->updateState(
+        first.identity, "operation-1", OperationState::Running);
+    CHECK(!invalid_transition);
+    CHECK(invalid_transition.error().category ==
+          industrial_bus::ErrorCategory::InvalidArgument);
+    auto wrong_owner = journal->updateState(
+        first.identity, "another-operation", OperationState::Running);
+    CHECK(!wrong_owner);
+    CHECK(wrong_owner.error().category ==
+          industrial_bus::ErrorCategory::IdempotencyConflict);
+
     auto locked = bus_core::IdempotencyJournal::open(options);
     CHECK(!locked);
     CHECK(locked.error().category == industrial_bus::ErrorCategory::FileIo);
@@ -218,6 +241,8 @@ void testIdempotencyJournal() {
     auto found = journal->find(first.identity);
     CHECK(found);
     CHECK(found.value().operation_id == "operation-1");
+    CHECK(found.value().state == OperationState::Failed);
+    CHECK(found.value().error == terminal_error);
 
     bus_core::CommandRegistration second;
     second.identity = {"caller", "layout.boolean.execute", "intent-2"};
