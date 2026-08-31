@@ -1,0 +1,27 @@
+#pragma once
+
+#include <string_view>
+
+namespace industrial_bus {
+
+template <typename Event>
+struct EventTopic {
+    std::string_view name;
+    std::string_view payload_type;
+};
+
+template <typename Command, typename Ack>
+struct CommandTopic {
+    std::string_view name;
+    std::string_view command_type;
+    std::string_view ack_type;
+};
+
+template <typename Request, typename Response>
+struct RequestTopic {
+    std::string_view name;
+    std::string_view request_type;
+    std::string_view response_type;
+};
+
+}  // namespace industrial_bus
