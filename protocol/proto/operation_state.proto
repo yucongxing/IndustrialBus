@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package industrial_bus.operation.v1;
+
+option optimize_for = SPEED;
+
+enum OperationState {
+  OPERATION_STATE_UNSPECIFIED = 0;
+  CREATED = 1;
+  RUNNING = 2;
+  CANCELLING = 3;
+  COMPLETED = 4;
+  FAILED = 5;
+  CANCELLED = 6;
+}

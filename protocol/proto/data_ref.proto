@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package industrial_bus.data.v1;
+
+option optimize_for = SPEED;
+
+enum DataScope {
+  DATA_SCOPE_UNSPECIFIED = 0;
+  LOCAL_USER = 1;
+}
+
+enum DataRefType {
+  DATA_REF_TYPE_UNSPECIFIED = 0;
+  FILE = 1;
+}
+
+enum DataAccessMode {
+  DATA_ACCESS_MODE_UNSPECIFIED = 0;
+  IMMUTABLE_READ_ONLY = 1;
+}
+
+enum DataConsumption {
+  DATA_CONSUMPTION_UNSPECIFIED = 0;
+  SINGLE_CONSUMER = 1;
+}
+
+message DataRef {
+  string id = 1;
+  DataScope scope = 2;
+  DataRefType type = 3;
+  string owner_node = 4;
+  string uri = 5;
+  uint64 offset = 6;
+  uint64 size = 7;
+  string format = 8;
+  uint32 format_version = 9;
+  string checksum = 10;
+  int64 expires_at_unix_ns = 11;
+  string owner_service = 12;
+  string owner_instance = 13;
+  DataAccessMode access_mode = 14;
+  DataConsumption consumption = 15;
+}
+
+message ReleaseDataRef {
+  string data_ref_id = 1;
+  string consumer_service = 2;
+  string consumer_instance = 3;
+}
+
+message ReleaseDataRefAck {
+  string data_ref_id = 1;
+  bool already_released = 2;
+}

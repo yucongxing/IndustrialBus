@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+package industrial_bus.logging.v1;
+
+option optimize_for = SPEED;
+
+enum LogLevel {
+  LOG_LEVEL_UNSPECIFIED = 0;
+  DEBUG = 1;
+  INFO = 2;
+  WARN = 3;
+  LOG_ERROR = 4;
+}
+
+message LogEvent {
+  int64 timestamp_unix_ns = 1;
+  string node_id = 2;
+  string service = 3;
+  string instance_id = 4;
+  string module = 5;
+  LogLevel level = 6;
+  string category = 7;
+  string message = 8;
+  string operation_id = 9;
+  string correlation_id = 10;
+  uint64 thread_id = 11;
+  string file = 12;
+  uint32 line = 13;
+  map<string, string> attributes = 14;
+  uint64 sequence = 15;
+}

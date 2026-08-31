@@ -1,0 +1,59 @@
+syntax = "proto3";
+
+package industrial_bus.operation.v1;
+
+import "data_ref.proto";
+import "operation_state.proto";
+import "system.proto";
+
+option optimize_for = SPEED;
+
+message OperationEvent {
+  string operation_id = 1;
+  string operation_type = 2;
+  OperationState state = 3;
+  string stage = 4;
+  oneof stage_progress_value {
+    double stage_progress = 5;
+  }
+  oneof overall_progress_value {
+    double overall_progress = 6;
+  }
+  int64 start_time_unix_ns = 7;
+  int64 end_time_unix_ns = 8;
+  industrial_bus.system.v1.Error error = 9;
+  industrial_bus.data.v1.DataRef result = 10;
+}
+
+message ProgressEvent {
+  string operation_id = 1;
+  string stage = 2;
+  oneof stage_progress_value {
+    double stage_progress = 3;
+  }
+  oneof overall_progress_value {
+    double overall_progress = 4;
+  }
+  oneof current_value {
+    uint64 current = 5;
+  }
+  oneof total_value {
+    uint64 total = 6;
+  }
+  string message = 7;
+}
+
+message GetOperationStatus {
+  string operation_id = 1;
+  string owner_service = 2;
+  string owner_instance = 3;
+}
+
+message OperationStatus {
+  OperationEvent operation = 1;
+}
+
+message CancelOperation {
+  string operation_id = 1;
+  string reason = 2;
+}

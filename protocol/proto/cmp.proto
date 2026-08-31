@@ -1,0 +1,33 @@
+syntax = "proto3";
+
+package industrial_bus.cmp.v1;
+
+import "data_ref.proto";
+import "system.proto";
+
+option optimize_for = SPEED;
+
+message RunSimulation {
+  string operation_id = 1;
+  industrial_bus.data.v1.DataRef input_layout = 2;
+  map<string, string> parameters = 3;
+}
+
+message SimulationProgress {
+  string operation_id = 1;
+  string stage = 2;
+  oneof overall_progress_value {
+    double overall_progress = 3;
+  }
+  string message = 4;
+}
+
+message SimulationCompleted {
+  string operation_id = 1;
+  industrial_bus.data.v1.DataRef result = 2;
+}
+
+message SimulationFailed {
+  string operation_id = 1;
+  industrial_bus.system.v1.Error error = 2;
+}

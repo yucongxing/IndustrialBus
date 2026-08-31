@@ -1,0 +1,44 @@
+syntax = "proto3";
+
+package industrial_bus.layout.v1;
+
+import "data_ref.proto";
+import "system.proto";
+
+option optimize_for = SPEED;
+
+message ExecuteBoolean {
+  string operation_id = 1;
+  industrial_bus.data.v1.DataRef left_layout = 2;
+  industrial_bus.data.v1.DataRef right_layout = 3;
+  string boolean_operator = 4;
+}
+
+message CancelBoolean {
+  string operation_id = 1;
+  string reason = 2;
+}
+
+message BooleanProgress {
+  string operation_id = 1;
+  string stage = 2;
+  oneof overall_progress_value {
+    double overall_progress = 3;
+  }
+  string message = 4;
+}
+
+message BooleanCompleted {
+  string operation_id = 1;
+  industrial_bus.data.v1.DataRef result = 2;
+}
+
+message BooleanFailed {
+  string operation_id = 1;
+  industrial_bus.system.v1.Error error = 2;
+}
+
+message SelectionChanged {
+  repeated string object_ids = 1;
+  string document_id = 2;
+}

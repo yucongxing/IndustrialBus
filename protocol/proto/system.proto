@@ -1,0 +1,85 @@
+syntax = "proto3";
+
+package industrial_bus.system.v1;
+
+import "operation_state.proto";
+
+option optimize_for = SPEED;
+
+enum ErrorCategory {
+  ERROR_CATEGORY_UNSPECIFIED = 0;
+  INVALID_ARGUMENT = 1;
+  FILE_IO = 2;
+  GEOMETRY_ERROR = 3;
+  OUT_OF_MEMORY = 4;
+  TIMEOUT = 5;
+  CONNECTION_LOST = 6;
+  SERVICE_UNAVAILABLE = 7;
+  CANCELLED = 8;
+  INTERNAL_ERROR = 9;
+  PROTOCOL_ERROR = 10;
+  PERMISSION_DENIED = 11;
+  RESOURCE_EXHAUSTED = 12;
+  HUB_RESTARTED = 13;
+  OWNER_UNAVAILABLE = 14;
+  IDEMPOTENCY_CONFLICT = 15;
+  SERVICE_ALREADY_REGISTERED = 16;
+}
+
+message Error {
+  ErrorCategory category = 1;
+  int32 code = 2;
+  string message = 3;
+  bool retryable = 4;
+  string operation_id = 5;
+  map<string, string> context = 6;
+}
+
+message CommandAck {
+  string operation_id = 1;
+  string owner_service = 2;
+  string owner_instance = 3;
+  bool duplicate = 4;
+  industrial_bus.operation.v1.OperationState current_state = 5;
+}
+
+enum InstanceMode {
+  SINGLETON_PER_USER = 0;
+  MULTI_INSTANCE = 1;
+}
+
+message ServiceRegistration {
+  string node_id = 1;
+  string service_name = 2;
+  string instance_id = 3;
+  string version = 4;
+  repeated string capabilities = 5;
+  map<string, string> metadata = 6;
+  InstanceMode instance_mode = 7;
+}
+
+message ServiceRegistrationAck {
+  string hub_instance_id = 1;
+  uint32 negotiated_protocol_version = 2;
+}
+
+message SubscriptionUpdate {
+  string topic = 1;
+  bool subscribe = 2;
+}
+
+message SubscriptionAck {
+  string topic = 1;
+  bool subscribed = 2;
+}
+
+message Heartbeat {
+  int64 sent_at_unix_ns = 1;
+}
+
+message ServiceDisconnected {
+  string node_id = 1;
+  string service_name = 2;
+  string instance_id = 3;
+  string reason = 4;
+}
