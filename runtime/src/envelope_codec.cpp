@@ -181,7 +181,15 @@ Result<transport::ByteBuffer> encodeOutbound(const client::OutboundMessage& mess
     wire.set_max_hops(1);
 
     std::string payload(message.payload.begin(), message.payload.end());
-    if (message.operation) {
+    if (message.error) {
+        system_proto::Error error;
+        fillError(*message.error, error);
+        if (!error.SerializeToString(&payload)) {
+            return Error::protocol("failed to serialize Error reply");
+        }
+        wire.set_payload_role(envelope::ERROR_DETAIL);
+        wire.set_payload_type("industrial_bus.system.v1.Error");
+    } else if (message.operation) {
         operation_proto::OperationEvent event;
         event.set_operation_id(message.operation->operation_id);
         event.set_operation_type(message.operation->operation_type);
@@ -222,9 +230,13 @@ Result<client::InboundMessage> decodeInbound(const transport::ByteBuffer& frame)
     result.correlation_id = wire.correlation_id();
     result.causation_id = wire.causation_id();
     result.operation_id = wire.operation_id();
+    result.source_service = wire.source_service();
+    result.source_instance = wire.source_instance();
     result.topic = wire.topic();
     result.payload_type = wire.payload_type();
     result.payload.assign(wire.payload().begin(), wire.payload().end());
+    result.idempotency_key = wire.idempotency_key();
+    result.deadline_unix_ns = wire.deadline_unix_ns();
 
     if (wire.payload_role() == envelope::ERROR_DETAIL) {
         system_proto::Error error;

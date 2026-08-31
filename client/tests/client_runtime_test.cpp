@@ -65,6 +65,11 @@ public:
         return sent.back();
     }
 
+    std::size_t sentCount() const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return sent.size();
+    }
+
     void deliver(client::InboundMessage message) {
         if (receive_handler) {
             receive_handler(std::move(message));
@@ -193,6 +198,84 @@ void testClientLifecycle() {
     adapter->deliver(std::move(ack));
     auto accepted = command_future.get();
     assert(accepted && accepted.value() == "accepted");
+
+    bool request_handler_called = false;
+    auto request_handler = bus->handleRequest(
+        request_topic,
+        [&](const std::string& value,
+            const MessageContext& context) -> Result<std::string> {
+            request_handler_called = true;
+            assert(value == "incoming question");
+            assert(context.message_id == "incoming-request-1");
+            assert(context.correlation_id == "correlation-1");
+            assert(context.operation_id == "operation-1");
+            assert(context.source_service == "caller");
+            assert(context.source_instance == "caller-1");
+            assert(context.deadline_unix_ns == 12345);
+            return std::string("incoming answer");
+        },
+        executor);
+    assert(request_handler);
+
+    client::InboundMessage incoming_request;
+    incoming_request.kind = client::MessageKind::Request;
+    incoming_request.message_id = "incoming-request-1";
+    incoming_request.correlation_id = "correlation-1";
+    incoming_request.operation_id = "operation-1";
+    incoming_request.source_service = "caller";
+    incoming_request.source_instance = "caller-1";
+    incoming_request.topic = "test.request";
+    incoming_request.payload_type = "test.StringRequest";
+    incoming_request.deadline_unix_ns = 12345;
+    PayloadCodec<std::string>::encode("incoming question", incoming_request.payload);
+    adapter->deliver(incoming_request);
+    assert(!request_handler_called);
+    executor->runAll();
+    assert(request_handler_called);
+    const auto response_reply = adapter->lastSent();
+    assert(response_reply.kind == client::MessageKind::Reply);
+    assert(response_reply.payload_role == client::PayloadRole::ResponseData);
+    assert(response_reply.causation_id == "incoming-request-1");
+    assert(response_reply.correlation_id == "correlation-1");
+    assert(response_reply.operation_id == "operation-1");
+    assert(response_reply.destination.service_name == "caller");
+    assert(response_reply.destination.instance_id == "caller-1");
+    assert(response_reply.payload_type == "test.StringReply");
+    std::string response_value;
+    assert(PayloadCodec<std::string>::decode(response_reply.payload, response_value));
+    assert(response_value == "incoming answer");
+
+    auto command_handler = bus->handleCommand(
+        command_topic,
+        [](const std::string&, const MessageContext& context) -> Result<std::string> {
+            assert(context.idempotency_key == "incoming-intent-1");
+            return Error::idempotencyConflict("intent already has another payload");
+        },
+        executor);
+    assert(command_handler);
+    client::InboundMessage incoming_command;
+    incoming_command.kind = client::MessageKind::Command;
+    incoming_command.message_id = "incoming-command-1";
+    incoming_command.correlation_id = "correlation-2";
+    incoming_command.source_service = "caller";
+    incoming_command.source_instance = "caller-1";
+    incoming_command.topic = "test.command";
+    incoming_command.payload_type = "test.StringCommand";
+    incoming_command.idempotency_key = "incoming-intent-1";
+    PayloadCodec<std::string>::encode("run", incoming_command.payload);
+    adapter->deliver(incoming_command);
+    executor->runAll();
+    const auto error_reply = adapter->lastSent();
+    assert(error_reply.payload_role == client::PayloadRole::ErrorDetail);
+    assert(error_reply.causation_id == "incoming-command-1");
+    assert(error_reply.error);
+    assert(error_reply.error->category == ErrorCategory::IdempotencyConflict);
+
+    const auto before_cancelled_delivery = adapter->sentCount();
+    adapter->deliver(incoming_request);
+    request_handler.cancel();
+    executor->runAll();
+    assert(adapter->sentCount() == before_cancelled_delivery);
 
     assert(bus->services().size() == 1);
     assert(bus->shutdown(std::chrono::milliseconds(10)));

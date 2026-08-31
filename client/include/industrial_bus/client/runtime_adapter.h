@@ -46,6 +46,7 @@ struct OutboundMessage {
     std::string idempotency_key;
     std::int64_t deadline_unix_ns{0};
     std::shared_ptr<OperationUpdate> operation;
+    std::shared_ptr<Error> error;
 };
 
 struct InboundMessage {
@@ -55,9 +56,13 @@ struct InboundMessage {
     std::string correlation_id;
     std::string causation_id;
     std::string operation_id;
+    std::string source_service;
+    std::string source_instance;
     std::string topic;
     std::string payload_type;
     ByteBuffer payload;
+    std::string idempotency_key;
+    std::int64_t deadline_unix_ns{0};
     bool has_error{false};
     Error error;
 };

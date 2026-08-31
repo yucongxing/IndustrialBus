@@ -1,5 +1,6 @@
 #include "industrial_bus/ids.h"
 #include "industrial_bus/runtime/commhub_server.h"
+#include "industrial_bus/runtime/envelope_codec.h"
 #include "industrial_bus/runtime/transport_runtime_adapter.h"
 #include "loopback_transport.h"
 
@@ -32,9 +33,38 @@ client::OutboundMessage eventMessage(std::string topic, std::string body) {
     return message;
 }
 
+void testErrorEnvelopeRoundTrip() {
+    client::OutboundMessage reply;
+    reply.kind = client::MessageKind::Reply;
+    reply.payload_role = client::PayloadRole::ErrorDetail;
+    reply.message_id = "error-message";
+    reply.correlation_id = "correlation";
+    reply.causation_id = "request-message";
+    reply.operation_id = "operation";
+    reply.topic = "test.request";
+    reply.payload_type = "industrial_bus.system.v1.Error";
+    reply.error = std::make_shared<Error>(
+        Error::idempotencyConflict("intent payload mismatch", 42));
+    reply.error->operation_id = "operation";
+    reply.error->context["key"] = "intent-1";
+
+    auto encoded = runtime::encodeOutbound(
+        reply, runtime::SourceIdentity{"node", "worker", "worker-instance"});
+    assert(encoded);
+    auto decoded = runtime::decodeInbound(encoded.value());
+    assert(decoded);
+    assert(decoded.value().kind == client::MessageKind::Reply);
+    assert(decoded.value().payload_role == client::PayloadRole::ErrorDetail);
+    assert(decoded.value().source_service == "worker");
+    assert(decoded.value().source_instance == "worker-instance");
+    assert(decoded.value().has_error);
+    assert(decoded.value().error == *reply.error);
+}
+
 }  // namespace
 
 int main() {
+    testErrorEnvelopeRoundTrip();
     auto loopback = std::make_shared<transport::LoopbackHub>();
     const transport::Endpoint endpoint{"loopback://runtime-e2e"};
     runtime::CommHubServer hub(loopback, endpoint, "hub-e2e", "test-token");
