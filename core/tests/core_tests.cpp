@@ -1,13 +1,17 @@
 #include "industrial_bus/core/bounded_priority_queue.h"
+#include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
 #include "industrial_bus/operation_state.h"
 #include "industrial_bus/result.h"
 
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
+#include <unistd.h>
 
 namespace {
 
@@ -18,6 +22,7 @@ using industrial_bus::OperationState;
 using industrial_bus::OperationStateMachine;
 using industrial_bus::QueueMetadata;
 using industrial_bus::QosPriority;
+namespace bus_core = industrial_bus::core;
 
 int failures = 0;
 
@@ -154,6 +159,107 @@ void testCriticalOverflow() {
           EnqueueDisposition::Rejected);
 }
 
+void testIdempotencyJournal() {
+    char directory_template[] = "/tmp/industrial-bus-journal-XXXXXX";
+    char* directory = ::mkdtemp(directory_template);
+    CHECK(directory != nullptr);
+    if (!directory) {
+        return;
+    }
+    const std::string path = std::string(directory) + "/commands.journal";
+    bus_core::IdempotencyJournalOptions options;
+    options.path = path;
+    options.max_live_records = 2;
+
+    auto opened = bus_core::IdempotencyJournal::open(options);
+    CHECK(opened);
+    if (!opened) {
+        ::rmdir(directory);
+        return;
+    }
+    auto journal = std::move(opened.value());
+
+    bus_core::CommandRegistration first;
+    first.identity = {"caller", "layout.boolean.execute", "intent-1"};
+    first.payload = {'a', 'b', 'c'};
+    first.operation_id = "operation-1";
+    first.owner_service = "layout-boolean";
+    first.owner_instance = "worker-1";
+    auto inserted = journal->registerCommand(first);
+    CHECK(inserted);
+    CHECK(!inserted.value().duplicate);
+    CHECK(inserted.value().record.payload_sha256 ==
+          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+
+    auto duplicate_command = first;
+    duplicate_command.operation_id = "must-not-replace-operation";
+    auto duplicate = journal->registerCommand(std::move(duplicate_command));
+    CHECK(duplicate);
+    CHECK(duplicate.value().duplicate);
+    CHECK(duplicate.value().record.operation_id == "operation-1");
+
+    auto conflicting_command = first;
+    conflicting_command.payload = {'x'};
+    auto conflict = journal->registerCommand(std::move(conflicting_command));
+    CHECK(!conflict);
+    CHECK(conflict.error().category ==
+          industrial_bus::ErrorCategory::IdempotencyConflict);
+    CHECK(conflict.error().operation_id == "operation-1");
+
+    auto locked = bus_core::IdempotencyJournal::open(options);
+    CHECK(!locked);
+    CHECK(locked.error().category == industrial_bus::ErrorCategory::FileIo);
+
+    journal.reset();
+    auto recovered = bus_core::IdempotencyJournal::open(options);
+    CHECK(recovered);
+    journal = std::move(recovered.value());
+    CHECK(journal->liveRecordCount() == 1);
+    auto found = journal->find(first.identity);
+    CHECK(found);
+    CHECK(found.value().operation_id == "operation-1");
+
+    bus_core::CommandRegistration second;
+    second.identity = {"caller", "layout.boolean.execute", "intent-2"};
+    second.payload = {'d'};
+    second.operation_id = "operation-2";
+    second.owner_service = "layout-boolean";
+    second.owner_instance = "worker-1";
+    CHECK(journal->registerCommand(second));
+
+    auto third = second;
+    third.identity.idempotency_key = "intent-3";
+    third.operation_id = "operation-3";
+    auto full = journal->registerCommand(std::move(third));
+    CHECK(!full);
+    CHECK(full.error().category == industrial_bus::ErrorCategory::ResourceExhausted);
+
+    journal.reset();
+    struct stat complete_info {};
+    CHECK(::stat(path.c_str(), &complete_info) == 0);
+    const int append_fd = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+    CHECK(append_fd >= 0);
+    if (append_fd >= 0) {
+        const unsigned char partial[] = {0x49, 0x42, 0x4a};
+        CHECK(::write(append_fd, partial, sizeof(partial)) ==
+              static_cast<ssize_t>(sizeof(partial)));
+        ::close(append_fd);
+    }
+    auto tail_recovered = bus_core::IdempotencyJournal::open(options);
+    CHECK(tail_recovered);
+    if (tail_recovered) {
+        journal = std::move(tail_recovered.value());
+        CHECK(journal->liveRecordCount() == 2);
+        struct stat recovered_info {};
+        CHECK(::stat(path.c_str(), &recovered_info) == 0);
+        CHECK(recovered_info.st_size == complete_info.st_size);
+    }
+
+    journal.reset();
+    CHECK(::unlink(path.c_str()) == 0);
+    CHECK(::rmdir(directory) == 0);
+}
+
 }  // namespace
 
 int main() {
@@ -163,6 +269,7 @@ int main() {
     testPriorityAndCapacity();
     testProgressCoalescingAndEviction();
     testCriticalOverflow();
+    testIdempotencyJournal();
 
     if (failures != 0) {
         std::cerr << failures << " test assertion(s) failed\n";

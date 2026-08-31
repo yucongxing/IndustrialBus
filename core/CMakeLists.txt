@@ -1,4 +1,5 @@
 add_library(industrial_bus_core STATIC
+    src/idempotency_journal.cpp
     src/ids.cpp
     src/operation_state.cpp
 )
