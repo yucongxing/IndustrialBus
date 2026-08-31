@@ -16,7 +16,8 @@ class CommHubServer {
 public:
     CommHubServer(std::shared_ptr<transport::IListener> listener,
                   transport::Endpoint endpoint,
-                  std::string hub_instance_id = {});
+                  std::string hub_instance_id = {},
+                  std::string auth_token = {});
     ~CommHubServer();
 
     Result<void> start();
@@ -40,6 +41,7 @@ private:
     std::shared_ptr<transport::IListener> listener_;
     transport::Endpoint endpoint_;
     std::string hub_instance_id_;
+    std::string auth_token_;
     commhub::HubCore core_;
     std::mutex mutex_;
     std::vector<std::shared_ptr<Peer>> peers_;

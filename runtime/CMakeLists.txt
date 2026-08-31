@@ -29,3 +29,13 @@ if(INDUSTRIAL_BUS_BUILD_TESTS)
     industrial_bus_target_defaults(industrial_bus_runtime_e2e_test)
     add_test(NAME industrial_bus_runtime_e2e_test COMMAND industrial_bus_runtime_e2e_test)
 endif()
+
+if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
+    add_executable(commhub ../commhub/main.cpp)
+    target_link_libraries(commhub
+        PRIVATE
+            IndustrialBus::Runtime
+            IndustrialBus::Bootstrap
+            IndustrialBus::TransportZeroMQ)
+    industrial_bus_target_defaults(commhub)
+endif()

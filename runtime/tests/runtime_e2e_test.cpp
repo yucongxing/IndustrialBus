@@ -37,14 +37,25 @@ client::OutboundMessage eventMessage(std::string topic, std::string body) {
 int main() {
     auto loopback = std::make_shared<transport::LoopbackHub>();
     const transport::Endpoint endpoint{"loopback://runtime-e2e"};
-    runtime::CommHubServer hub(loopback, endpoint, "hub-e2e");
+    runtime::CommHubServer hub(loopback, endpoint, "hub-e2e", "test-token");
     assert(hub.start());
+
+    runtime::TransportRuntimeOptions rejected_options;
+    rejected_options.endpoint = endpoint;
+    rejected_options.connector = loopback;
+    rejected_options.service_name = "rejected";
+    rejected_options.instance_id = "rejected-instance";
+    rejected_options.auth_token = "wrong-token";
+    rejected_options.handshake_timeout = std::chrono::milliseconds(20);
+    runtime::TransportRuntimeAdapter rejected(rejected_options);
+    assert(!rejected.start());
 
     runtime::TransportRuntimeOptions caller_options;
     caller_options.endpoint = endpoint;
     caller_options.connector = loopback;
     caller_options.service_name = "caller";
     caller_options.instance_id = "caller-instance";
+    caller_options.auth_token = "test-token";
     auto caller = std::make_shared<runtime::TransportRuntimeAdapter>(caller_options);
 
     runtime::TransportRuntimeOptions worker_options;
@@ -52,6 +63,7 @@ int main() {
     worker_options.connector = loopback;
     worker_options.service_name = "worker";
     worker_options.instance_id = "worker-instance";
+    worker_options.auth_token = "test-token";
     auto worker = std::make_shared<runtime::TransportRuntimeAdapter>(worker_options);
 
     std::mutex mutex;

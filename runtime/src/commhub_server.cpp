@@ -82,11 +82,13 @@ struct CommHubServer::Peer {
 
 CommHubServer::CommHubServer(std::shared_ptr<transport::IListener> listener,
                              transport::Endpoint endpoint,
-                             std::string hub_instance_id)
+                             std::string hub_instance_id,
+                             std::string auth_token)
     : listener_(std::move(listener)),
       endpoint_(std::move(endpoint)),
       hub_instance_id_(hub_instance_id.empty() ? generateUuidV4()
-                                                : std::move(hub_instance_id)) {}
+                                                : std::move(hub_instance_id)),
+      auth_token_(std::move(auth_token)) {}
 
 CommHubServer::~CommHubServer() { stop(); }
 
@@ -209,6 +211,13 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
         !registration.ParseFromString(wire.payload()) ||
         registration.service_name().empty() || registration.instance_id().empty()) {
         return Error::protocol("invalid ServiceRegistration");
+    }
+    const auto authorization = wire.headers().find("authorization");
+    if (!auth_token_.empty() &&
+        (authorization == wire.headers().end() ||
+         authorization->second != auth_token_)) {
+        return Error::make(ErrorCategory::PermissionDenied,
+                           "invalid CommHub authentication token");
     }
     if (!peer->session_id.empty()) {
         return Error::protocol("connection is already registered");

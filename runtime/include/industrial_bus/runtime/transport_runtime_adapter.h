@@ -17,6 +17,7 @@ struct TransportRuntimeOptions {
     std::string service_name;
     std::string instance_id;
     std::string service_version{"0.1.0"};
+    std::string auth_token;
     std::chrono::milliseconds handshake_timeout{std::chrono::seconds(3)};
 };
 

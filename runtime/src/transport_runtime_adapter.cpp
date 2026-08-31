@@ -20,7 +20,8 @@ transport::ByteBuffer serializeSystemEnvelope(
     const SourceIdentity& source,
     const std::string& topic,
     const std::string& payload_type,
-    const google::protobuf::MessageLite& payload) {
+    const google::protobuf::MessageLite& payload,
+    const std::string& auth_token) {
     envelope::MessageEnvelope wire;
     wire.set_message_id(generateUuidV4());
     wire.set_correlation_id(generateUuidV4());
@@ -34,6 +35,9 @@ transport::ByteBuffer serializeSystemEnvelope(
     wire.set_protocol_version(1);
     wire.set_schema_version(1);
     wire.set_max_hops(1);
+    if (!auth_token.empty()) {
+        (*wire.mutable_headers())["authorization"] = auth_token;
+    }
     payload.SerializeToString(wire.mutable_payload());
     std::string bytes;
     wire.SerializeToString(&bytes);
@@ -200,7 +204,8 @@ Result<void> TransportRuntimeAdapter::sendRegistration() {
                                 options_.instance_id};
     const auto frame = serializeSystemEnvelope(
         source, "system.service.register",
-        "industrial_bus.system.v1.ServiceRegistration", registration);
+        "industrial_bus.system.v1.ServiceRegistration", registration,
+        options_.auth_token);
     auto sent = connection_->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
 }
@@ -225,7 +230,8 @@ Result<void> TransportRuntimeAdapter::sendSubscription(const std::string& topic,
                                 options_.instance_id};
     const auto frame = serializeSystemEnvelope(
         source, "system.subscription.update",
-        "industrial_bus.system.v1.SubscriptionUpdate", update);
+        "industrial_bus.system.v1.SubscriptionUpdate", update,
+        options_.auth_token);
     const auto sent = connection->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
 }
