@@ -18,7 +18,7 @@ public:
     Result<void> listen(const Endpoint& endpoint, AcceptHandler handler) override;
     Future<Result<std::shared_ptr<IConnection>>> connect(const Endpoint& endpoint) override;
 
-    void close();
+    void close() override;
 
 private:
     mutable std::mutex mutex_;

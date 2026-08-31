@@ -30,7 +30,7 @@ public:
     ~ZeroMqRouterListener() override;
 
     Result<void> listen(const Endpoint& endpoint, AcceptHandler handler) override;
-    void close();
+    void close() override;
 
 private:
     class Impl;

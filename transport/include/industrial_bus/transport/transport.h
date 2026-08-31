@@ -124,6 +124,7 @@ class IListener {
 public:
     virtual ~IListener() = default;
     virtual Result<void> listen(const Endpoint& endpoint, AcceptHandler handler) = 0;
+    virtual void close() = 0;
 };
 
 }  // namespace industrial_bus::transport
