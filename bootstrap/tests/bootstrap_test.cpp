@@ -1,0 +1,136 @@
+#include "industrial_bus/bootstrap/endpoint_record.h"
+#include "industrial_bus/bootstrap/hub_lock.h"
+#include "industrial_bus/bootstrap/runtime_paths.h"
+
+#include <cerrno>
+#include <cstdlib>
+#include <fcntl.h>
+#include <functional>
+#include <iostream>
+#include <stdexcept>
+#include <string>
+#include <sys/stat.h>
+#include <unistd.h>
+
+namespace {
+
+class TempDirectory {
+public:
+    TempDirectory() {
+        char pattern[] = "/tmp/industrial-bus-bootstrap-XXXXXX";
+        const char* result = ::mkdtemp(pattern);
+        if (result == nullptr) throw std::runtime_error("mkdtemp failed");
+        path_ = result;
+        if (::chmod(path_.c_str(), 0700) != 0) throw std::runtime_error("chmod failed");
+    }
+    ~TempDirectory() {
+        const std::string child = path_ + "/industrial-bus";
+        ::unlink((child + "/commhub.lock").c_str());
+        ::unlink((child + "/endpoint.json").c_str());
+        ::unlink((child + "/auth.token").c_str());
+        ::unlink((child + "/bad-link").c_str());
+        ::rmdir(child.c_str());
+        ::rmdir(path_.c_str());
+    }
+    const std::string& path() const noexcept { return path_; }
+private:
+    std::string path_;
+};
+
+void require(bool condition, const char* message) {
+    if (!condition) throw std::runtime_error(message);
+}
+
+template <typename Function>
+void requireThrows(Function function, const char* message) {
+    try { function(); } catch (const std::exception&) { return; }
+    throw std::runtime_error(message);
+}
+
+void happyPath() {
+    TempDirectory temp;
+    const auto paths = industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir(temp.path());
+    require(paths.endpoint().rfind("ipc://", 0) == 0, "IPC endpoint missing scheme");
+
+    struct stat status {};
+    require(::stat(paths.runtimeDir().c_str(), &status) == 0, "runtime directory missing");
+    require((status.st_mode & 0777) == 0700, "runtime directory mode is not 0700");
+
+    auto lock = industrial_bus::bootstrap::HubLock::tryAcquire(paths);
+    require(lock.has_value(), "first lock acquisition failed");
+    require(!industrial_bus::bootstrap::HubLock::tryAcquire(paths).has_value(), "second lock acquisition succeeded");
+    require((::fcntl(lock->descriptor(), F_GETFD) & FD_CLOEXEC) != 0, "lock does not start CLOEXEC");
+    lock->makeInheritableForExec();
+    require((::fcntl(lock->descriptor(), F_GETFD) & FD_CLOEXEC) == 0, "lock did not become inheritable");
+    lock->setCloseOnExec();
+
+    const auto token = industrial_bus::bootstrap::generateAuthToken();
+    require(token.size() == 64, "token size is wrong");
+    industrial_bus::bootstrap::writeAuthToken(paths, token);
+    require(industrial_bus::bootstrap::readAuthToken(paths) == token, "token round trip failed");
+
+    industrial_bus::bootstrap::EndpointRecord expected{
+        paths.endpoint(), static_cast<std::int64_t>(::getpid()), "hub-test-instance", 1, 1700000000};
+    industrial_bus::bootstrap::writeEndpointRecord(paths, expected);
+    const auto actual = industrial_bus::bootstrap::readEndpointRecord(paths);
+    require(actual.endpoint == expected.endpoint && actual.pid == expected.pid &&
+            actual.hub_instance_id == expected.hub_instance_id &&
+            actual.protocol_version == expected.protocol_version &&
+            actual.start_time == expected.start_time, "endpoint record round trip failed");
+
+    require(::stat(paths.endpointRecordPath().c_str(), &status) == 0 &&
+            (status.st_mode & 0777) == 0600, "endpoint mode is not 0600");
+    require(::stat(paths.tokenPath().c_str(), &status) == 0 &&
+            (status.st_mode & 0777) == 0600, "token mode is not 0600");
+}
+
+void rejectsUnsafePathsAndFiles() {
+    requireThrows([] { industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir("relative"); },
+                  "relative XDG_RUNTIME_DIR accepted");
+    TempDirectory temp;
+    require(::chmod(temp.path().c_str(), 0755) == 0, "test chmod failed");
+    requireThrows([&] { industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir(temp.path()); },
+                  "unsafe XDG_RUNTIME_DIR mode accepted");
+    require(::chmod(temp.path().c_str(), 0700) == 0, "test chmod restore failed");
+    const auto paths = industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir(temp.path());
+
+    const std::string target = temp.path() + "/token-target";
+    const int target_fd = ::open(target.c_str(), O_CREAT | O_WRONLY, 0600);
+    require(target_fd >= 0, "test target creation failed");
+    ::close(target_fd);
+    require(::symlink(target.c_str(), paths.tokenPath().c_str()) == 0, "test symlink creation failed");
+    requireThrows([&] { (void)industrial_bus::bootstrap::readAuthToken(paths); },
+                  "symlink token accepted");
+    ::unlink(paths.tokenPath().c_str());
+    ::unlink(target.c_str());
+
+    industrial_bus::bootstrap::writeAuthToken(paths, industrial_bus::bootstrap::generateAuthToken());
+    require(::chmod(paths.tokenPath().c_str(), 0644) == 0, "test chmod failed");
+    requireThrows([&] { (void)industrial_bus::bootstrap::readAuthToken(paths); },
+                  "overly broad token mode accepted");
+}
+
+void rejectsLongSocketPath() {
+    TempDirectory temp;
+    std::string child = temp.path() + "/" + std::string(90, 'x');
+    require(::mkdir(child.c_str(), 0700) == 0, "long test directory creation failed");
+    requireThrows([&] { industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir(child); },
+                  "overlong Unix socket path accepted");
+    ::rmdir((child + "/industrial-bus").c_str());
+    ::rmdir(child.c_str());
+}
+
+}  // namespace
+
+int main() {
+    try {
+        happyPath();
+        rejectsUnsafePathsAndFiles();
+        rejectsLongSocketPath();
+        std::cout << "bootstrap tests passed\n";
+        return 0;
+    } catch (const std::exception& error) {
+        std::cerr << "bootstrap test failed: " << error.what() << '\n';
+        return 1;
+    }
+}
