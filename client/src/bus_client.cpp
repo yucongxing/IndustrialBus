@@ -298,6 +298,10 @@ Subscription BusClient::subscribeRaw(std::string topic,
     if (!executor) {
         executor = impl_->executor;
     }
+    const auto subscription_result = impl_->adapter->subscribe(topic);
+    if (!subscription_result) {
+        return {};
+    }
     return impl_->state->subscriptions->add(std::move(topic), std::move(payload_type),
                                              std::move(handler), std::move(executor));
 }

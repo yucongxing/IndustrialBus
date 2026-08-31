@@ -84,7 +84,7 @@ RouteDecision MessageRouter::route(const SessionId& source_session,
     }
 
     bool stored = false;
-    if (message.kind == MessageKind::request) {
+    if (message.kind == MessageKind::request || message.kind == MessageKind::command) {
         const auto status = return_routes_.put(message.message_id,
                                                source_session,
                                                destination->session_id,

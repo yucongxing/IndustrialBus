@@ -41,7 +41,7 @@ function(industrial_bus_target_defaults target)
     endif()
 endfunction()
 
-foreach(component IN ITEMS core protocol transport bootstrap client integration commhub)
+foreach(component IN ITEMS core protocol transport bootstrap client integration commhub runtime)
     if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${component}/CMakeLists.txt")
         add_subdirectory(${component})
     endif()

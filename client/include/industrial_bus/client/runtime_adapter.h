@@ -72,6 +72,8 @@ public:
     virtual ~IRuntimeAdapter() = default;
     virtual Result<void> start() = 0;
     virtual Result<void> send(OutboundMessage message) = 0;
+    virtual Result<void> subscribe(const std::string&) { return Result<void>::success(); }
+    virtual Result<void> unsubscribe(const std::string&) { return Result<void>::success(); }
     virtual void setReceiveHandler(ReceiveHandler handler) = 0;
     virtual void setConnectionHandler(ConnectionHandler handler) = 0;
     virtual ConnectionState state() const = 0;
