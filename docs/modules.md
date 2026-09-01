@@ -46,15 +46,18 @@ apply business policy.
 
 Owns the raw byte-frame SPI (`IConnection`, `IConnector`, `IListener`) and the
 Loopback and ZeroMQ DEALER/ROUTER implementations. It owns connection-local
-queues, frame delivery, and bounded shutdown behavior.
+queues, frame delivery, and bounded shutdown behavior. A closed ZeroMQ
+`RouterPeer` removes its identity mapping, while conditional erase and ROUTER
+handover allow a new peer with the same routing identity without letting a late
+close erase the replacement.
 
 It does not understand Envelope, topics, services, tokens, discovery,
 idempotency, or heartbeat policy.
 
 - Targets: `IndustrialBus::TransportSPI`, `IndustrialBus::TransportLoopback`,
   and conditional `IndustrialBus::TransportZeroMQ`
-- Tests: bidirectional frame and close propagation; real ZeroMQ IPC and bounded
-  ROUTER shutdown
+- Tests: bidirectional frame and close propagation; real ZeroMQ IPC, bounded
+  ROUTER shutdown, and same-routing-identity reconnection
 
 ## `bootstrap`
 

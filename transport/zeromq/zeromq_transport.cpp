@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -187,8 +188,14 @@ struct RouterState {
 
 class RouterPeer final : public IConnection {
 public:
-    RouterPeer(std::weak_ptr<RouterState> state, std::string identity)
-        : state_(std::move(state)), identity_(std::move(identity)) {}
+    using CloseHandler = std::function<void(const std::string&, const RouterPeer*)>;
+
+    RouterPeer(std::weak_ptr<RouterState> state,
+               std::string identity,
+               CloseHandler close_handler)
+        : state_(std::move(state)),
+          identity_(std::move(identity)),
+          close_handler_(std::move(close_handler)) {}
 
     Result<void> send(ByteView frame) override {
         auto state = state_.lock();
@@ -220,7 +227,19 @@ public:
         return !closed_.load() && state ? state->state.load() : ConnectionState::closed;
     }
 
-    void close() override { closed_.store(true); }
+    void close() override {
+        if (closed_.exchange(true)) {
+            return;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            handler_ = {};
+            pending_.clear();
+        }
+        if (close_handler_) {
+            close_handler_(identity_, this);
+        }
+    }
 
     void deliver(ByteBuffer frame) {
         ReceiveHandler handler;
@@ -241,6 +260,7 @@ public:
 private:
     std::weak_ptr<RouterState> state_;
     std::string identity_;
+    CloseHandler close_handler_;
     std::atomic<bool> closed_{false};
     mutable std::mutex mutex_;
     ReceiveHandler handler_;
@@ -316,19 +336,31 @@ public:
             worker.join();
         }
         state->state.store(ConnectionState::closed);
-        std::lock_guard<std::mutex> lock(peers_mutex);
-        for (auto& entry : peers) {
+        std::unordered_map<std::string, std::shared_ptr<RouterPeer>> closing_peers;
+        {
+            std::lock_guard<std::mutex> lock(peers_mutex);
+            closing_peers.swap(peers);
+        }
+        for (auto& entry : closing_peers) {
             entry.second->close();
         }
-        peers.clear();
     }
 
 private:
+    void removePeer(const std::string& identity, const RouterPeer* expected) {
+        std::lock_guard<std::mutex> lock(peers_mutex);
+        const auto found = peers.find(identity);
+        if (found != peers.end() && found->second.get() == expected) {
+            peers.erase(found);
+        }
+    }
+
     void run(std::string endpoint, AcceptHandler accept, std::promise<Result<void>> startup) {
         try {
             zmq::socket_t socket(*state->context, zmq::socket_type::router);
             socket.set(zmq::sockopt::linger, 0);
             socket.set(zmq::sockopt::sndtimeo, 10);
+            socket.set(zmq::sockopt::router_handover, 1);
             socket.bind(endpoint);
             state->state.store(ConnectionState::connected);
             startup.set_value(Result<void>::success());
@@ -392,7 +424,15 @@ private:
                     std::lock_guard<std::mutex> lock(peers_mutex);
                     auto found = peers.find(identity);
                     if (found == peers.end()) {
-                        peer = std::make_shared<RouterPeer>(state, identity);
+                        std::weak_ptr<Impl> weak_self = weak_from_this();
+                        peer = std::make_shared<RouterPeer>(
+                            state, identity,
+                            [weak_self](const std::string& closed_identity,
+                                        const RouterPeer* closed_peer) {
+                                if (auto self = weak_self.lock()) {
+                                    self->removePeer(closed_identity, closed_peer);
+                                }
+                            });
                         peers.emplace(identity, peer);
                         is_new = true;
                     } else {
