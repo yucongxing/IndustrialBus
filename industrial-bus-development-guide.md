@@ -1468,17 +1468,18 @@ share/
 
 ### 26.2 CMake 接入
 
-最低 CMake 版本为 3.20，首版使用 target-based CMake。Protobuf、libzmq、cppzmq 均由开发机、CI 和发布环境预先安装，通过 Config Package 引入；构建过程不使用 `FetchContent`，不访问网络：
+最低 CMake 版本为 3.20，首版使用 target-based CMake。Protobuf、libzmq、cppzmq 以及测试专用 GoogleTest 均由开发机、CI 和发布环境预先安装，通过 Config Package 引入；构建过程不使用 `FetchContent`，不访问网络：
 
 ```cmake
 find_package(Threads REQUIRED)
 find_package(Protobuf CONFIG REQUIRED)
 find_package(ZeroMQ CONFIG REQUIRED)
 find_package(cppzmq CONFIG REQUIRED)
+find_package(GTest CONFIG REQUIRED) # 仅 BUILD_TESTING 时
 find_package(IndustrialBus CONFIG REQUIRED)
 ```
 
-依赖安装位置通过 `CMAKE_PREFIX_PATH` 或 `<Package>_DIR` 提供。机器本地路径只写入不提交的 `CMakeUserPresets.json` 或 CI 环境，禁止硬编码到项目。所有依赖必须通过 imported targets 使用，`protoc` 与 Protobuf Runtime 必须来自同一套安装。配置阶段校验支持版本，版本不满足时立即失败。
+依赖安装位置通过 `CMAKE_PREFIX_PATH` 或 `<Package>_DIR` 提供。机器本地路径只写入不提交的 `CMakeUserPresets.json` 或 CI 环境，禁止硬编码到项目。所有依赖必须通过 imported targets 使用，`protoc` 与 Protobuf Runtime 必须来自同一套安装。单元测试和集成测试统一使用 GoogleTest，并通过 `gtest_discover_tests` 注册到 CTest。配置阶段校验支持版本，版本不满足时立即失败。
 
 ```cmake
 target_link_libraries(layout_boolean
@@ -1612,7 +1613,7 @@ target_link_libraries(layout_boolean
 11. 协议兼容测试和故障注入测试进入 CI。
 12. 业务代码不包含 ZeroMQ 或 Transport 细节。
 13. IndustrialBus 构建不查找或链接 Qt；三个业务应用可通过自有 Executor Adapter 投递 UI 回调。
-14. 构建完全离线，Protobuf、libzmq、cppzmq 仅通过本地安装的 CMake Config Package 引入。
+14. 构建完全离线，Protobuf、libzmq、cppzmq 和测试专用 GoogleTest 仅通过本地安装的 CMake Config Package 引入。
 15. Command API 明确区分本地入队、Hub 路由和目标服务 Accepted；Accepted 只在幂等记录可靠落盘后返回。
 16. Topic、消息方向、payload role、Protobuf 完整类型名和 schema major 的不匹配消息会被拒绝。
 17. Accepted 后断线不自动重放，客户端可通过 Operation 状态查询获得权威结果或明确的 `OWNER_UNAVAILABLE`。
@@ -1666,7 +1667,7 @@ target_link_libraries(layout_boolean
 
 ### ADR-008：首版平台、工具链与依赖
 
-首版固定 Linux x86_64、GCC 9+、libstdc++、C++17、CMake 3.20+、Release。Protobuf、libzmq、cppzmq 使用本地预安装的 CMake Config Package，禁止构建期下载。IndustrialBus 完全不依赖 Qt；Qt 5.13 Release 仅由业务应用使用。
+首版固定 Linux x86_64、GCC 9+、libstdc++、C++17、CMake 3.20+、Release。Protobuf、libzmq、cppzmq 和测试专用 GoogleTest 使用本地预安装的 CMake Config Package，禁止构建期下载。IndustrialBus 完全不依赖 Qt；Qt 5.13 Release 仅由业务应用使用。
 
 ### ADR-009：消息身份与因果模型
 

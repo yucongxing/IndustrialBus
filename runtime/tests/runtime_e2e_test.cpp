@@ -6,7 +6,8 @@
 #include "industrial_bus/runtime/transport_runtime_adapter.h"
 #include "loopback_transport.h"
 
-#include <cassert>
+#include <gtest/gtest.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -37,7 +38,7 @@ client::OutboundMessage eventMessage(std::string topic, std::string body) {
     return message;
 }
 
-void testErrorEnvelopeRoundTrip() {
+TEST(EnvelopeCodecTest, PreservesStructuredError) {
     client::OutboundMessage reply;
     reply.kind = client::MessageKind::Reply;
     reply.payload_role = client::PayloadRole::ErrorDetail;
@@ -54,35 +55,32 @@ void testErrorEnvelopeRoundTrip() {
 
     auto encoded = runtime::encodeOutbound(
         reply, runtime::SourceIdentity{"node", "worker", "worker-instance"});
-    assert(encoded);
+    ASSERT_TRUE(encoded);
     auto decoded = runtime::decodeInbound(encoded.value());
-    assert(decoded);
-    assert(decoded.value().kind == client::MessageKind::Reply);
-    assert(decoded.value().payload_role == client::PayloadRole::ErrorDetail);
-    assert(decoded.value().source_service == "worker");
-    assert(decoded.value().source_instance == "worker-instance");
-    assert(decoded.value().has_error);
-    assert(decoded.value().error == *reply.error);
+    ASSERT_TRUE(decoded);
+    EXPECT_TRUE(decoded.value().kind == client::MessageKind::Reply);
+    EXPECT_TRUE(decoded.value().payload_role == client::PayloadRole::ErrorDetail);
+    EXPECT_TRUE(decoded.value().source_service == "worker");
+    EXPECT_TRUE(decoded.value().source_instance == "worker-instance");
+    EXPECT_TRUE(decoded.value().has_error);
+    EXPECT_TRUE(decoded.value().error == *reply.error);
 }
 
-}  // namespace
-
-int main() {
+TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
     char journal_directory_template[] = "/tmp/industrial-bus-e2e-journal-XXXXXX";
     char* journal_directory = ::mkdtemp(journal_directory_template);
-    assert(journal_directory != nullptr);
+    ASSERT_NE(journal_directory, nullptr);
     const std::string journal_path =
         std::string(journal_directory) + "/commands.journal";
     core::IdempotencyJournalOptions journal_options;
     journal_options.path = journal_path;
     auto opened_journal = core::IdempotencyJournal::open(journal_options);
-    assert(opened_journal);
+    ASSERT_TRUE(opened_journal);
 
-    testErrorEnvelopeRoundTrip();
     auto loopback = std::make_shared<transport::LoopbackHub>();
     const transport::Endpoint endpoint{"loopback://runtime-e2e"};
     runtime::CommHubServer hub(loopback, endpoint, "hub-e2e", "test-token");
-    assert(hub.start());
+    ASSERT_TRUE(hub.start());
 
     runtime::TransportRuntimeOptions rejected_options;
     rejected_options.endpoint = endpoint;
@@ -92,7 +90,7 @@ int main() {
     rejected_options.auth_token = "wrong-token";
     rejected_options.handshake_timeout = std::chrono::milliseconds(20);
     runtime::TransportRuntimeAdapter rejected(rejected_options);
-    assert(!rejected.start());
+    EXPECT_TRUE(!rejected.start());
 
     runtime::TransportRuntimeOptions caller_options;
     caller_options.endpoint = endpoint;
@@ -124,7 +122,7 @@ int main() {
             route_error = std::move(message.error);
         } else if (message.payload_role == client::PayloadRole::CommandAck) {
             system::v1::CommandAck ack;
-            assert(PayloadCodec<system::v1::CommandAck>::decode(message.payload, ack));
+            EXPECT_TRUE(PayloadCodec<system::v1::CommandAck>::decode(message.payload, ack));
             command_ack = ack.operation_id();
             duplicate_ack = ack.duplicate();
             ++ack_count;
@@ -134,14 +132,14 @@ int main() {
         changed.notify_all();
     });
 
-    assert(caller->start());
+    ASSERT_TRUE(caller->start());
     ClientOptions worker_client_options;
     worker_client_options.service_name = "worker";
     worker_client_options.runtime_adapter = worker;
     worker_client_options.idempotency_journal =
         std::shared_ptr<core::IdempotencyJournal>(std::move(opened_journal.value()));
     auto connected_worker = BusClient::connect(worker_client_options);
-    assert(connected_worker);
+    ASSERT_TRUE(connected_worker);
     auto worker_bus = connected_worker.value();
     const CommandTopic<std::string, system::v1::CommandAck> command_topic{
         "test.command", "test.StringCommand",
@@ -150,17 +148,17 @@ int main() {
     auto command_handler = worker_bus->handleCommand(
         command_topic,
         [&](const std::string& value, const MessageContext&) -> Result<void> {
-            assert(value == "execute");
+            EXPECT_TRUE(value == "execute");
             ++command_executions;
             return {};
         });
-    assert(command_handler);
+    EXPECT_TRUE(command_handler);
 
-    assert(caller->subscribe("test.event"));
-    assert(worker->send(eventMessage("test.event", "broadcast")));
+    EXPECT_TRUE(caller->subscribe("test.event"));
+    EXPECT_TRUE(worker->send(eventMessage("test.event", "broadcast")));
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+        EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
             return caller_event == "broadcast";
         }));
     }
@@ -178,15 +176,15 @@ int main() {
     command.idempotency_key = "runtime-e2e-command";
     command.deadline_unix_ns = deadlineAfter(std::chrono::seconds(2));
     PayloadCodec<std::string>::encode("execute", command.payload);
-    assert(caller->send(std::move(command)));
+    EXPECT_TRUE(caller->send(std::move(command)));
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+        EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
             return command_ack == command_operation_id && ack_count == 1;
         }));
     }
-    assert(command_executions == 1);
-    assert(!duplicate_ack);
+    EXPECT_TRUE(command_executions == 1);
+    EXPECT_TRUE(!duplicate_ack);
 
     client::OutboundMessage duplicate_command;
     duplicate_command.kind = client::MessageKind::Command;
@@ -200,14 +198,14 @@ int main() {
     duplicate_command.idempotency_key = "runtime-e2e-command";
     duplicate_command.deadline_unix_ns = deadlineAfter(std::chrono::seconds(2));
     PayloadCodec<std::string>::encode("execute", duplicate_command.payload);
-    assert(caller->send(std::move(duplicate_command)));
+    EXPECT_TRUE(caller->send(std::move(duplicate_command)));
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+        EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
             return ack_count == 2 && duplicate_ack;
         }));
     }
-    assert(command_executions == 1);
+    EXPECT_TRUE(command_executions == 1);
 
     client::OutboundMessage missing;
     missing.kind = client::MessageKind::Command;
@@ -219,18 +217,19 @@ int main() {
     missing.payload_type = "test.MissingCommand";
     missing.idempotency_key = "runtime-e2e-missing";
     missing.deadline_unix_ns = deadlineAfter(std::chrono::seconds(2));
-    assert(caller->send(std::move(missing)));
+    EXPECT_TRUE(caller->send(std::move(missing)));
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+        EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
             return route_error.category == ErrorCategory::ServiceUnavailable;
         }));
     }
 
-    assert(worker_bus->shutdown(std::chrono::milliseconds(20)));
+    EXPECT_TRUE(worker_bus->shutdown(std::chrono::milliseconds(20)));
     caller->close();
     hub.stop();
-    assert(::unlink(journal_path.c_str()) == 0);
-    assert(::rmdir(journal_directory) == 0);
-    return 0;
+    EXPECT_TRUE(::unlink(journal_path.c_str()) == 0);
+    EXPECT_TRUE(::rmdir(journal_directory) == 0);
 }
+
+}  // namespace

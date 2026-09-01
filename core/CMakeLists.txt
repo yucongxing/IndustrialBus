@@ -14,6 +14,7 @@ target_include_directories(industrial_bus_core
 
 if(BUILD_TESTING)
     add_executable(industrial_bus_core_tests tests/core_tests.cpp)
-    target_link_libraries(industrial_bus_core_tests PRIVATE IndustrialBus::Core)
-    add_test(NAME industrial_bus_core_tests COMMAND industrial_bus_core_tests)
+    target_link_libraries(industrial_bus_core_tests
+        PRIVATE IndustrialBus::Core GTest::gtest_main)
+    gtest_discover_tests(industrial_bus_core_tests)
 endif()

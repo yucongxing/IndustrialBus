@@ -47,12 +47,10 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
             tests/zeromq_transport_test.cpp
         )
         target_link_libraries(industrial_bus_zeromq_transport_test
-            PRIVATE IndustrialBus::TransportZeroMQ
+            PRIVATE IndustrialBus::TransportZeroMQ GTest::gtest_main
         )
-        add_test(NAME industrial_bus_zeromq_transport_test
-                 COMMAND industrial_bus_zeromq_transport_test)
-        set_tests_properties(industrial_bus_zeromq_transport_test
-            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 5)
+        gtest_discover_tests(industrial_bus_zeromq_transport_test
+            PROPERTIES TIMEOUT 5)
     endif()
 endif()
 
@@ -61,8 +59,8 @@ if(BUILD_TESTING)
         tests/loopback_transport_test.cpp
     )
     target_link_libraries(industrial_bus_loopback_transport_test
-        PRIVATE IndustrialBus::TransportLoopback
+        PRIVATE IndustrialBus::TransportLoopback GTest::gtest_main
     )
-    add_test(NAME industrial_bus_loopback_transport_test
-             COMMAND industrial_bus_loopback_transport_test)
+    gtest_discover_tests(industrial_bus_loopback_transport_test
+        PROPERTIES TIMEOUT 5)
 endif()

@@ -5,13 +5,15 @@
 
 #include "system.pb.h"
 
+#include <gtest/gtest.h>
+
 #include <algorithm>
-#include <cassert>
 #include <chrono>
 #include <cstdint>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <unistd.h>
@@ -87,7 +89,9 @@ public:
 
     client::OutboundMessage lastSent() {
         std::lock_guard<std::mutex> lock(mutex);
-        assert(!sent.empty());
+        if (sent.empty()) {
+            throw std::logic_error("no message was sent");
+        }
         return sent.back();
     }
 
@@ -133,10 +137,10 @@ public:
     bool fail_unsubscribe{false};
 };
 
-void testPendingTableTimeoutAndLateReply() {
+TEST(PendingRequestTableTest, TimesOutAndCountsLateReply) {
     client::PendingRequestTable table;
     bool timed_out = false;
-    assert(table.add("request-1", "reply.type",
+    EXPECT_TRUE(table.add("request-1", "reply.type",
                      client::PendingRequestTable::Clock::now() +
                          std::chrono::milliseconds(15),
                      [&](Result<ByteBuffer> result) {
@@ -146,21 +150,21 @@ void testPendingTableTimeoutAndLateReply() {
     for (int i = 0; i < 50 && !timed_out; ++i) {
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
-    assert(timed_out);
-    assert(!table.complete("request-1", "reply.type", ByteBuffer{}));
-    assert(table.lateReplyCount() == 1);
+    EXPECT_TRUE(timed_out);
+    EXPECT_TRUE(!table.complete("request-1", "reply.type", ByteBuffer{}));
+    EXPECT_TRUE(table.lateReplyCount() == 1);
 }
 
-void testClientLifecycle() {
+TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
     char directory_template[] = "/tmp/industrial-bus-client-journal-XXXXXX";
     char* journal_directory = ::mkdtemp(directory_template);
-    assert(journal_directory != nullptr);
+    EXPECT_TRUE(journal_directory != nullptr);
     const std::string journal_path =
         std::string(journal_directory) + "/commands.journal";
     core::IdempotencyJournalOptions journal_options;
     journal_options.path = journal_path;
     auto opened_journal = core::IdempotencyJournal::open(journal_options);
-    assert(opened_journal);
+    EXPECT_TRUE(opened_journal);
 
     auto adapter = std::make_shared<FakeAdapter>();
     ClientOptions options;
@@ -170,63 +174,63 @@ void testClientLifecycle() {
         std::shared_ptr<core::IdempotencyJournal>(std::move(opened_journal.value()));
     options.idempotency_journal = journal;
     auto connected = BusClient::connect(options);
-    assert(connected);
+    EXPECT_TRUE(connected);
     auto bus = connected.value();
-    assert(bus->connectionState() == ConnectionState::Connected);
+    EXPECT_TRUE(bus->connectionState() == ConnectionState::Connected);
 
     auto second = BusClient::connect(options);
-    assert(second && second.value() == bus);
+    EXPECT_TRUE(second && second.value() == bus);
 
     const EventTopic<std::string> event_topic{"test.event", "test.String"};
     auto executor = std::make_shared<ManualExecutor>();
     int callbacks = 0;
     auto subscription = bus->subscribe(
         event_topic, [&](const std::string&) { ++callbacks; }, executor);
-    assert(adapter->subscribeCount("test.event") == 1);
+    EXPECT_TRUE(adapter->subscribeCount("test.event") == 1);
     client::InboundMessage event;
     event.kind = client::MessageKind::Event;
     event.topic = "test.event";
     event.payload_type = "test.String";
     PayloadCodec<std::string>::encode("payload", event.payload);
     adapter->deliver(event);
-    assert(executor->tasks.size() == 1);
+    EXPECT_TRUE(executor->tasks.size() == 1);
     subscription.cancel();
-    assert(adapter->unsubscribeCount("test.event") == 1);
+    EXPECT_TRUE(adapter->unsubscribeCount("test.event") == 1);
     executor->runAll();
-    assert(callbacks == 0);  // A queued callback must observe cancellation.
+    EXPECT_TRUE(callbacks == 0);  // A queued callback must observe cancellation.
 
     auto active = bus->subscribe(
         event_topic, [&](const std::string& value) {
-            assert(value == "payload");
+            EXPECT_TRUE(value == "payload");
             ++callbacks;
         }, executor);
-    assert(adapter->subscribeCount("test.event") == 2);
+    EXPECT_TRUE(adapter->subscribeCount("test.event") == 2);
     auto same_topic = bus->subscribe(
         event_topic, [&](const std::string&) { ++callbacks; }, executor);
-    assert(same_topic);
-    assert(adapter->subscribeCount("test.event") == 2);
+    EXPECT_TRUE(same_topic);
+    EXPECT_TRUE(adapter->subscribeCount("test.event") == 2);
     same_topic.cancel();
-    assert(adapter->unsubscribeCount("test.event") == 1);
+    EXPECT_TRUE(adapter->unsubscribeCount("test.event") == 1);
     adapter->deliver(event);
     executor->runAll();
-    assert(callbacks == 1);
+    EXPECT_TRUE(callbacks == 1);
     Subscription moved = std::move(active);
-    assert(!active && moved);
+    EXPECT_TRUE(!active && moved);
 
     adapter->fail_subscribe = true;
     const EventTopic<std::string> failed_topic{"test.failed", "test.String"};
     auto failed_subscription = bus->subscribe(
         failed_topic, [&](const std::string&) { ++callbacks; }, executor);
-    assert(!failed_subscription);
-    assert(adapter->subscribeCount("test.failed") == 1);
+    EXPECT_TRUE(!failed_subscription);
+    EXPECT_TRUE(adapter->subscribeCount("test.failed") == 1);
     adapter->fail_subscribe = false;
     auto retried_subscription = bus->subscribe(
         failed_topic, [&](const std::string&) { ++callbacks; }, executor);
-    assert(retried_subscription);
-    assert(adapter->subscribeCount("test.failed") == 2);
+    EXPECT_TRUE(retried_subscription);
+    EXPECT_TRUE(adapter->subscribeCount("test.failed") == 2);
     adapter->fail_unsubscribe = true;
     retried_subscription.cancel();
-    assert(adapter->unsubscribeCount("test.failed") == 1);
+    EXPECT_TRUE(adapter->unsubscribeCount("test.failed") == 1);
     adapter->fail_unsubscribe = false;
 
     const RequestTopic<std::string, std::string> request_topic{
@@ -242,30 +246,30 @@ void testClientLifecycle() {
     PayloadCodec<std::string>::encode("answer", reply.payload);
     adapter->deliver(std::move(reply));
     auto response = response_future.get();
-    assert(response && response.value() == "answer");
+    EXPECT_TRUE(response && response.value() == "answer");
 
     auto timeout_future = bus->request(Destination{"worker", {}}, request_topic,
                                        std::string("slow"),
                                        std::chrono::milliseconds(20));
     auto timeout_result = timeout_future.get();
-    assert(!timeout_result);
-    assert(timeout_result.error().category == ErrorCategory::Timeout);
+    EXPECT_TRUE(!timeout_result);
+    EXPECT_TRUE(timeout_result.error().category == ErrorCategory::Timeout);
 
     auto restart_future = bus->request(Destination{"worker", {}}, request_topic,
                                        std::string("restart"),
                                        std::chrono::seconds(1));
     adapter->changeGeneration(2);
-    assert(adapter->subscribeCount("test.event") == 3);
+    EXPECT_TRUE(adapter->subscribeCount("test.event") == 3);
     auto restart_result = restart_future.get();
-    assert(!restart_result);
-    assert(restart_result.error().category == ErrorCategory::HubRestarted);
+    EXPECT_TRUE(!restart_result);
+    EXPECT_TRUE(restart_result.error().category == ErrorCategory::HubRestarted);
 
     const CommandTopic<std::string, system::v1::CommandAck> command_topic{
         "test.command", "test.StringCommand",
         "industrial_bus.system.v1.CommandAck"};
     auto invalid_command = bus->command(Destination{"worker", {}}, command_topic,
                                         std::string("run"));
-    assert(invalid_command.get().error().category == ErrorCategory::InvalidArgument);
+    EXPECT_TRUE(invalid_command.get().error().category == ErrorCategory::InvalidArgument);
 
     CommandOptions command_options;
     command_options.idempotency_key = "intent-1";
@@ -283,7 +287,7 @@ void testClientLifecycle() {
     PayloadCodec<system::v1::CommandAck>::encode(wire_ack, ack.payload);
     adapter->deliver(std::move(ack));
     auto accepted = command_future.get();
-    assert(accepted && accepted.value().operation_id() == "outgoing-operation");
+    EXPECT_TRUE(accepted && accepted.value().operation_id() == "outgoing-operation");
 
     bool request_handler_called = false;
     auto request_handler = bus->handleRequest(
@@ -291,17 +295,17 @@ void testClientLifecycle() {
         [&](const std::string& value,
             const MessageContext& context) -> Result<std::string> {
             request_handler_called = true;
-            assert(value == "incoming question");
-            assert(context.message_id == "incoming-request-1");
-            assert(context.correlation_id == "correlation-1");
-            assert(context.operation_id == "operation-1");
-            assert(context.source_service == "caller");
-            assert(context.source_instance == "caller-1");
-            assert(context.deadline_unix_ns == 12345);
+            EXPECT_TRUE(value == "incoming question");
+            EXPECT_TRUE(context.message_id == "incoming-request-1");
+            EXPECT_TRUE(context.correlation_id == "correlation-1");
+            EXPECT_TRUE(context.operation_id == "operation-1");
+            EXPECT_TRUE(context.source_service == "caller");
+            EXPECT_TRUE(context.source_instance == "caller-1");
+            EXPECT_TRUE(context.deadline_unix_ns == 12345);
             return std::string("incoming answer");
         },
         executor);
-    assert(request_handler);
+    EXPECT_TRUE(request_handler);
 
     client::InboundMessage incoming_request;
     incoming_request.kind = client::MessageKind::Request;
@@ -315,37 +319,37 @@ void testClientLifecycle() {
     incoming_request.deadline_unix_ns = 12345;
     PayloadCodec<std::string>::encode("incoming question", incoming_request.payload);
     adapter->deliver(incoming_request);
-    assert(!request_handler_called);
+    EXPECT_TRUE(!request_handler_called);
     executor->runAll();
-    assert(request_handler_called);
+    EXPECT_TRUE(request_handler_called);
     const auto response_reply = adapter->lastSent();
-    assert(response_reply.kind == client::MessageKind::Reply);
-    assert(response_reply.payload_role == client::PayloadRole::ResponseData);
-    assert(response_reply.causation_id == "incoming-request-1");
-    assert(response_reply.correlation_id == "correlation-1");
-    assert(response_reply.operation_id == "operation-1");
-    assert(response_reply.destination.service_name == "caller");
-    assert(response_reply.destination.instance_id == "caller-1");
-    assert(response_reply.payload_type == "test.StringReply");
+    EXPECT_TRUE(response_reply.kind == client::MessageKind::Reply);
+    EXPECT_TRUE(response_reply.payload_role == client::PayloadRole::ResponseData);
+    EXPECT_TRUE(response_reply.causation_id == "incoming-request-1");
+    EXPECT_TRUE(response_reply.correlation_id == "correlation-1");
+    EXPECT_TRUE(response_reply.operation_id == "operation-1");
+    EXPECT_TRUE(response_reply.destination.service_name == "caller");
+    EXPECT_TRUE(response_reply.destination.instance_id == "caller-1");
+    EXPECT_TRUE(response_reply.payload_type == "test.StringReply");
     std::string response_value;
-    assert(PayloadCodec<std::string>::decode(response_reply.payload, response_value));
-    assert(response_value == "incoming answer");
+    EXPECT_TRUE(PayloadCodec<std::string>::decode(response_reply.payload, response_value));
+    EXPECT_TRUE(response_value == "incoming answer");
 
     int command_handler_calls = 0;
     auto command_handler = bus->handleCommand(
         command_topic,
         [&](const std::string& value, const MessageContext& context) -> Result<void> {
             ++command_handler_calls;
-            assert(!context.operation_id.empty());
+            EXPECT_TRUE(!context.operation_id.empty());
             if (value == "fail") {
-                assert(context.idempotency_key == "incoming-intent-failed");
+                EXPECT_TRUE(context.idempotency_key == "incoming-intent-failed");
                 return Error::internal("cannot enqueue command");
             }
-            assert(context.idempotency_key == "incoming-intent-1");
+            EXPECT_TRUE(context.idempotency_key == "incoming-intent-1");
             return {};
         },
         executor);
-    assert(command_handler);
+    EXPECT_TRUE(command_handler);
     client::InboundMessage incoming_command;
     incoming_command.kind = client::MessageKind::Command;
     incoming_command.message_id = "incoming-command-1";
@@ -358,56 +362,56 @@ void testClientLifecycle() {
     PayloadCodec<std::string>::encode("run", incoming_command.payload);
     adapter->deliver(incoming_command);
     executor->runAll();
-    assert(command_handler_calls == 1);
+    EXPECT_TRUE(command_handler_calls == 1);
     const auto accepted_reply = adapter->lastSent();
-    assert(accepted_reply.payload_role == client::PayloadRole::CommandAck);
-    assert(accepted_reply.causation_id == "incoming-command-1");
-    assert(accepted_reply.payload_type == "industrial_bus.system.v1.CommandAck");
+    EXPECT_TRUE(accepted_reply.payload_role == client::PayloadRole::CommandAck);
+    EXPECT_TRUE(accepted_reply.causation_id == "incoming-command-1");
+    EXPECT_TRUE(accepted_reply.payload_type == "industrial_bus.system.v1.CommandAck");
     system::v1::CommandAck accepted_ack;
-    assert(PayloadCodec<system::v1::CommandAck>::decode(accepted_reply.payload,
+    EXPECT_TRUE(PayloadCodec<system::v1::CommandAck>::decode(accepted_reply.payload,
                                                         accepted_ack));
-    assert(!accepted_ack.operation_id().empty());
-    assert(accepted_ack.owner_service() == "test-client");
-    assert(accepted_ack.owner_instance() == "test-instance");
-    assert(!accepted_ack.duplicate());
-    assert(accepted_ack.current_state() == operation::v1::RUNNING);
+    EXPECT_TRUE(!accepted_ack.operation_id().empty());
+    EXPECT_TRUE(accepted_ack.owner_service() == "test-client");
+    EXPECT_TRUE(accepted_ack.owner_instance() == "test-instance");
+    EXPECT_TRUE(!accepted_ack.duplicate());
+    EXPECT_TRUE(accepted_ack.current_state() == operation::v1::RUNNING);
 
     incoming_command.message_id = "incoming-command-duplicate";
     adapter->deliver(incoming_command);
     executor->runAll();
-    assert(command_handler_calls == 1);
+    EXPECT_TRUE(command_handler_calls == 1);
     const auto duplicate_reply = adapter->lastSent();
     system::v1::CommandAck duplicate_ack;
-    assert(PayloadCodec<system::v1::CommandAck>::decode(duplicate_reply.payload,
+    EXPECT_TRUE(PayloadCodec<system::v1::CommandAck>::decode(duplicate_reply.payload,
                                                         duplicate_ack));
-    assert(duplicate_ack.duplicate());
-    assert(duplicate_ack.operation_id() == accepted_ack.operation_id());
+    EXPECT_TRUE(duplicate_ack.duplicate());
+    EXPECT_TRUE(duplicate_ack.operation_id() == accepted_ack.operation_id());
 
     incoming_command.message_id = "incoming-command-conflict";
     PayloadCodec<std::string>::encode("different", incoming_command.payload);
     adapter->deliver(incoming_command);
     executor->runAll();
-    assert(command_handler_calls == 1);
+    EXPECT_TRUE(command_handler_calls == 1);
     const auto conflict_reply = adapter->lastSent();
-    assert(conflict_reply.error);
-    assert(conflict_reply.error->category == ErrorCategory::IdempotencyConflict);
+    EXPECT_TRUE(conflict_reply.error);
+    EXPECT_TRUE(conflict_reply.error->category == ErrorCategory::IdempotencyConflict);
 
     incoming_command.message_id = "incoming-command-failed";
     incoming_command.idempotency_key = "incoming-intent-failed";
     PayloadCodec<std::string>::encode("fail", incoming_command.payload);
     adapter->deliver(incoming_command);
     executor->runAll();
-    assert(command_handler_calls == 2);
+    EXPECT_TRUE(command_handler_calls == 2);
     const auto failed_reply = adapter->lastSent();
-    assert(failed_reply.error);
-    assert(failed_reply.error->category == ErrorCategory::InternalError);
+    EXPECT_TRUE(failed_reply.error);
+    EXPECT_TRUE(failed_reply.error->category == ErrorCategory::InternalError);
     incoming_command.message_id = "incoming-command-failed-retry";
     adapter->deliver(incoming_command);
     executor->runAll();
-    assert(command_handler_calls == 2);
+    EXPECT_TRUE(command_handler_calls == 2);
     const auto failed_retry_reply = adapter->lastSent();
-    assert(failed_retry_reply.error);
-    assert(failed_retry_reply.error->category == ErrorCategory::InternalError);
+    EXPECT_TRUE(failed_retry_reply.error);
+    EXPECT_TRUE(failed_retry_reply.error->category == ErrorCategory::InternalError);
 
     const CommandTopic<system::v1::CommandAck, system::v1::CommandAck>
         protobuf_command_topic{"test.protobuf-command",
@@ -421,7 +425,7 @@ void testClientLifecycle() {
             return {};
         },
         executor);
-    assert(protobuf_command_handler);
+    EXPECT_TRUE(protobuf_command_handler);
     const auto records_before_malformed = journal->liveRecordCount();
     client::InboundMessage malformed_command;
     malformed_command.kind = client::MessageKind::Command;
@@ -433,31 +437,25 @@ void testClientLifecycle() {
     malformed_command.idempotency_key = "malformed-intent";
     malformed_command.payload = {0xffU};
     adapter->deliver(std::move(malformed_command));
-    assert(malformed_handler_calls == 0);
-    assert(journal->liveRecordCount() == records_before_malformed);
+    EXPECT_TRUE(malformed_handler_calls == 0);
+    EXPECT_TRUE(journal->liveRecordCount() == records_before_malformed);
     const auto malformed_reply = adapter->lastSent();
-    assert(malformed_reply.error);
-    assert(malformed_reply.error->category == ErrorCategory::ProtocolError);
+    EXPECT_TRUE(malformed_reply.error);
+    EXPECT_TRUE(malformed_reply.error->category == ErrorCategory::ProtocolError);
 
     const auto before_cancelled_delivery = adapter->sentCount();
     adapter->deliver(incoming_request);
     request_handler.cancel();
     executor->runAll();
-    assert(adapter->sentCount() == before_cancelled_delivery);
+    EXPECT_TRUE(adapter->sentCount() == before_cancelled_delivery);
 
-    assert(bus->services().size() == 1);
-    assert(bus->shutdown(std::chrono::milliseconds(10)));
-    assert(adapter->unsubscribeCount("test.event") == 2);
-    assert(bus->connectionState() == ConnectionState::Disconnected);
-    assert(bus->shutdown(std::chrono::milliseconds(10)));
-    assert(::unlink(journal_path.c_str()) == 0);
-    assert(::rmdir(journal_directory) == 0);
+    EXPECT_TRUE(bus->services().size() == 1);
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
+    EXPECT_TRUE(adapter->unsubscribeCount("test.event") == 2);
+    EXPECT_TRUE(bus->connectionState() == ConnectionState::Disconnected);
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
+    EXPECT_TRUE(::unlink(journal_path.c_str()) == 0);
+    EXPECT_TRUE(::rmdir(journal_directory) == 0);
 }
 
 }  // namespace
-
-int main() {
-    testPendingTableTimeoutAndLateReply();
-    testClientLifecycle();
-    return 0;
-}

@@ -15,6 +15,11 @@ option(INDUSTRIAL_BUS_ENABLE_PROTOBUF "Build Protobuf protocol targets" ON)
 option(INDUSTRIAL_BUS_ENABLE_ZEROMQ "Build ZeroMQ transport and CommHub" ON)
 option(INDUSTRIAL_BUS_BUILD_TESTS "Build IndustrialBus tests" ${BUILD_TESTING})
 
+if(BUILD_TESTING OR INDUSTRIAL_BUS_BUILD_TESTS)
+    find_package(GTest CONFIG REQUIRED)
+    include(GoogleTest)
+endif()
+
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)

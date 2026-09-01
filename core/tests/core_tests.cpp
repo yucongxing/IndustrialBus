@@ -4,10 +4,10 @@
 #include "industrial_bus/operation_state.h"
 #include "industrial_bus/result.h"
 
+#include <gtest/gtest.h>
+
 #include <atomic>
-#include <cstdlib>
 #include <fcntl.h>
-#include <iostream>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -24,162 +24,175 @@ using industrial_bus::MessageClass;
 using industrial_bus::OperationState;
 using industrial_bus::OperationStateMachine;
 using industrial_bus::QueueMetadata;
-using industrial_bus::QosPriority;
 namespace bus_core = industrial_bus::core;
 
-int failures = 0;
-
-void check(bool condition, const char* expression, int line) {
-    if (!condition) {
-        std::cerr << "FAILED line " << line << ": " << expression << '\n';
-        ++failures;
+class JournalTempDirectory {
+public:
+    JournalTempDirectory() {
+        char directory_template[] = "/tmp/industrial-bus-journal-XXXXXX";
+        const char* directory = ::mkdtemp(directory_template);
+        if (directory == nullptr) {
+            throw std::runtime_error("mkdtemp failed");
+        }
+        directory_ = directory;
+        journal_path_ = directory_ + "/commands.journal";
     }
-}
 
-#define CHECK(expression) check(static_cast<bool>(expression), #expression, __LINE__)
-
-void testResult() {
-    industrial_bus::Result<int> good(42);
-    CHECK(good);
-    CHECK(good.value() == 42);
-
-    industrial_bus::Result<int> bad(
-        industrial_bus::Error::invalidArgument("bad argument", 7));
-    CHECK(!bad);
-    CHECK(bad.error().category == industrial_bus::ErrorCategory::InvalidArgument);
-    CHECK(bad.error().code == 7);
-
-    bool threw = false;
-    try {
-        (void)bad.value();
-    } catch (const std::logic_error&) {
-        threw = true;
+    ~JournalTempDirectory() {
+        ::unlink(journal_path_.c_str());
+        ::rmdir(directory_.c_str());
     }
-    CHECK(threw);
 
-    industrial_bus::Result<void> void_result;
-    CHECK(void_result);
-}
+    const std::string& journalPath() const noexcept { return journal_path_; }
 
-void testIdentifiers() {
-    std::set<std::string> generated;
-    for (int i = 0; i < 1000; ++i) {
-        auto id = industrial_bus::generateUuidV4();
-        CHECK(industrial_bus::isValidUuid(id));
-        generated.insert(std::move(id));
-    }
-    CHECK(generated.size() == 1000);
-    CHECK(!industrial_bus::isValidUuid("not-a-uuid"));
-    CHECK(industrial_bus::isValidProtocolId("layout.boolean:instance-1"));
-    CHECK(!industrial_bus::isValidProtocolId("has a space"));
-    CHECK(!industrial_bus::isValidProtocolId(""));
-}
-
-void testOperationStateMachine() {
-    OperationStateMachine operation;
-    CHECK(operation.state() == OperationState::Created);
-    CHECK(operation.transitionTo(OperationState::Running));
-    CHECK(operation.requestCancellation());
-    CHECK(operation.state() == OperationState::Cancelling);
-    CHECK(operation.requestCancellation());
-    CHECK(operation.transitionTo(OperationState::Completed));
-    CHECK(industrial_bus::isTerminal(operation.state()));
-    CHECK(!operation.transitionTo(OperationState::Running));
-
-    OperationStateMachine queued;
-    CHECK(queued.requestCancellation());
-    CHECK(queued.state() == OperationState::Cancelled);
-    CHECK(queued.requestCancellation());
-
-    CHECK(!industrial_bus::isValidTransition(OperationState::Created,
-                                             OperationState::Completed));
-    CHECK(industrial_bus::isValidTransition(OperationState::Cancelling,
-                                            OperationState::Failed));
-}
+private:
+    std::string directory_;
+    std::string journal_path_;
+};
 
 QueueMetadata metadata(MessageClass message_class, std::string key = {}) {
     return QueueMetadata{industrial_bus::defaultPriority(message_class), message_class,
                          std::move(key)};
 }
 
-void testPriorityAndCapacity() {
-    BoundedPriorityQueue<std::string> queue(3);
-    CHECK(queue.tryEnqueue("event", metadata(MessageClass::Event)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue("request", metadata(MessageClass::Request)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue("reply", metadata(MessageClass::Reply)) ==
-          EnqueueDisposition::Enqueued);
+TEST(ResultTest, CarriesValuesAndErrors) {
+    industrial_bus::Result<int> good(42);
+    ASSERT_TRUE(good);
+    EXPECT_EQ(good.value(), 42);
 
-    CHECK(queue.tryDequeue().value() == "reply");
-    CHECK(queue.tryDequeue().value() == "request");
-    CHECK(queue.tryDequeue().value() == "event");
-    CHECK(!queue.tryDequeue().has_value());
+    industrial_bus::Result<int> bad(
+        industrial_bus::Error::invalidArgument("bad argument", 7));
+    ASSERT_FALSE(bad);
+    EXPECT_EQ(bad.error().category,
+              industrial_bus::ErrorCategory::InvalidArgument);
+    EXPECT_EQ(bad.error().code, 7);
+    EXPECT_THROW((void)bad.value(), std::logic_error);
+
+    industrial_bus::Result<void> void_result;
+    EXPECT_TRUE(void_result);
+}
+
+TEST(IdentifiersTest, GeneratesAndValidatesProtocolIdentifiers) {
+    std::set<std::string> generated;
+    for (int i = 0; i < 1000; ++i) {
+        auto id = industrial_bus::generateUuidV4();
+        EXPECT_TRUE(industrial_bus::isValidUuid(id));
+        generated.insert(std::move(id));
+    }
+    EXPECT_EQ(generated.size(), 1000U);
+    EXPECT_FALSE(industrial_bus::isValidUuid("not-a-uuid"));
+    EXPECT_TRUE(
+        industrial_bus::isValidProtocolId("layout.boolean:instance-1"));
+    EXPECT_FALSE(industrial_bus::isValidProtocolId("has a space"));
+    EXPECT_FALSE(industrial_bus::isValidProtocolId(""));
+}
+
+TEST(OperationStateMachineTest, EnforcesTransitionsAndCancellation) {
+    OperationStateMachine operation;
+    EXPECT_EQ(operation.state(), OperationState::Created);
+    ASSERT_TRUE(operation.transitionTo(OperationState::Running));
+    ASSERT_TRUE(operation.requestCancellation());
+    EXPECT_EQ(operation.state(), OperationState::Cancelling);
+    EXPECT_TRUE(operation.requestCancellation());
+    ASSERT_TRUE(operation.transitionTo(OperationState::Completed));
+    EXPECT_TRUE(industrial_bus::isTerminal(operation.state()));
+    EXPECT_FALSE(operation.transitionTo(OperationState::Running));
+
+    OperationStateMachine queued;
+    ASSERT_TRUE(queued.requestCancellation());
+    EXPECT_EQ(queued.state(), OperationState::Cancelled);
+    EXPECT_TRUE(queued.requestCancellation());
+
+    EXPECT_FALSE(industrial_bus::isValidTransition(OperationState::Created,
+                                                   OperationState::Completed));
+    EXPECT_TRUE(industrial_bus::isValidTransition(OperationState::Cancelling,
+                                                  OperationState::Failed));
+}
+
+TEST(BoundedPriorityQueueTest, HonorsPriorityAndCapacity) {
+    BoundedPriorityQueue<std::string> queue(3);
+    EXPECT_EQ(queue.tryEnqueue("event", metadata(MessageClass::Event)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue("request", metadata(MessageClass::Request)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue("reply", metadata(MessageClass::Reply)),
+              EnqueueDisposition::Enqueued);
+
+    auto item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "reply");
+    item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "request");
+    item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "event");
+    EXPECT_FALSE(queue.tryDequeue());
 
     BoundedPriorityQueue<int> high_only(1);
-    CHECK(high_only.tryEnqueue(1, metadata(MessageClass::Command)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(high_only.tryEnqueue(2, metadata(MessageClass::Request)) ==
-          EnqueueDisposition::Rejected);
-    CHECK(high_only.tryDequeue().value() == 1);
+    EXPECT_EQ(high_only.tryEnqueue(1, metadata(MessageClass::Command)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(high_only.tryEnqueue(2, metadata(MessageClass::Request)),
+              EnqueueDisposition::Rejected);
+    const auto high_item = high_only.tryDequeue();
+    ASSERT_TRUE(high_item);
+    EXPECT_EQ(*high_item, 1);
 }
 
-void testProgressCoalescingAndEviction() {
+TEST(BoundedPriorityQueueTest, CoalescesProgressAndEvictsLowPriorityItems) {
     BoundedPriorityQueue<std::string> queue(2);
-    CHECK(queue.tryEnqueue("p10", metadata(MessageClass::Progress, "operation-a")) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue("p20", metadata(MessageClass::Progress, "operation-a")) ==
-          EnqueueDisposition::Coalesced);
-    CHECK(queue.size() == 1);
-    CHECK(queue.tryDequeue().value() == "p20");
+    EXPECT_EQ(queue.tryEnqueue(
+                  "p10", metadata(MessageClass::Progress, "operation-a")),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue(
+                  "p20", metadata(MessageClass::Progress, "operation-a")),
+              EnqueueDisposition::Coalesced);
+    EXPECT_EQ(queue.size(), 1U);
+    auto item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "p20");
 
-    CHECK(queue.tryEnqueue("debug", metadata(MessageClass::DebugLog)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue("info", metadata(MessageClass::InfoLog)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue("command", metadata(MessageClass::Command)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.size() == 2);
-    CHECK(queue.tryDequeue().value() == "command");
-    CHECK(queue.tryDequeue().value() == "info");
+    EXPECT_EQ(queue.tryEnqueue("debug", metadata(MessageClass::DebugLog)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue("info", metadata(MessageClass::InfoLog)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue("command", metadata(MessageClass::Command)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.size(), 2U);
+    item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "command");
+    item = queue.tryDequeue();
+    ASSERT_TRUE(item);
+    EXPECT_EQ(*item, "info");
 
     const auto stats = queue.stats();
-    CHECK(stats.coalesced == 1);
-    CHECK(stats.dropped == 1);
-    CHECK(stats.high_watermark == 2);
+    EXPECT_EQ(stats.coalesced, 1U);
+    EXPECT_EQ(stats.dropped, 1U);
+    EXPECT_EQ(stats.high_watermark, 2U);
 }
 
-void testCriticalOverflow() {
+TEST(BoundedPriorityQueueTest, ReportsCriticalOverflow) {
     BoundedPriorityQueue<int> queue(1);
-    CHECK(queue.tryEnqueue(1, metadata(MessageClass::FinalState)) ==
-          EnqueueDisposition::Enqueued);
-    CHECK(queue.tryEnqueue(2, metadata(MessageClass::Reply)) ==
-          EnqueueDisposition::CriticalOverflow);
-    CHECK(queue.stats().critical_overflow == 1);
+    EXPECT_EQ(queue.tryEnqueue(1, metadata(MessageClass::FinalState)),
+              EnqueueDisposition::Enqueued);
+    EXPECT_EQ(queue.tryEnqueue(2, metadata(MessageClass::Reply)),
+              EnqueueDisposition::CriticalOverflow);
+    EXPECT_EQ(queue.stats().critical_overflow, 1U);
 
     BoundedPriorityQueue<int> zero(0);
-    CHECK(zero.tryEnqueue(1, metadata(MessageClass::DebugLog)) ==
-          EnqueueDisposition::Rejected);
+    EXPECT_EQ(zero.tryEnqueue(1, metadata(MessageClass::DebugLog)),
+              EnqueueDisposition::Rejected);
 }
 
-void testIdempotencyJournal() {
-    char directory_template[] = "/tmp/industrial-bus-journal-XXXXXX";
-    char* directory = ::mkdtemp(directory_template);
-    CHECK(directory != nullptr);
-    if (!directory) {
-        return;
-    }
-    const std::string path = std::string(directory) + "/commands.journal";
+TEST(IdempotencyJournalTest, PersistsDeduplicatesAndRecoversCommands) {
+    JournalTempDirectory temp;
     bus_core::IdempotencyJournalOptions options;
-    options.path = path;
+    options.path = temp.journalPath();
     options.max_live_records = 2;
 
     auto opened = bus_core::IdempotencyJournal::open(options);
-    CHECK(opened);
-    if (!opened) {
-        ::rmdir(directory);
-        return;
-    }
+    ASSERT_TRUE(opened);
     auto journal = std::move(opened.value());
 
     bus_core::CommandRegistration first;
@@ -189,63 +202,63 @@ void testIdempotencyJournal() {
     first.owner_service = "layout-boolean";
     first.owner_instance = "worker-1";
     auto inserted = journal->registerCommand(first);
-    CHECK(inserted);
-    CHECK(!inserted.value().duplicate);
-    CHECK(inserted.value().record.payload_sha256 ==
-          "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+    ASSERT_TRUE(inserted);
+    EXPECT_FALSE(inserted.value().duplicate);
+    EXPECT_EQ(inserted.value().record.payload_sha256,
+              "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
 
     auto duplicate_command = first;
     duplicate_command.operation_id = "must-not-replace-operation";
     auto duplicate = journal->registerCommand(std::move(duplicate_command));
-    CHECK(duplicate);
-    CHECK(duplicate.value().duplicate);
-    CHECK(duplicate.value().record.operation_id == "operation-1");
+    ASSERT_TRUE(duplicate);
+    EXPECT_TRUE(duplicate.value().duplicate);
+    EXPECT_EQ(duplicate.value().record.operation_id, "operation-1");
 
     auto conflicting_command = first;
     conflicting_command.payload = {'x'};
     auto conflict = journal->registerCommand(std::move(conflicting_command));
-    CHECK(!conflict);
-    CHECK(conflict.error().category ==
-          industrial_bus::ErrorCategory::IdempotencyConflict);
-    CHECK(conflict.error().operation_id == "operation-1");
+    ASSERT_FALSE(conflict);
+    EXPECT_EQ(conflict.error().category,
+              industrial_bus::ErrorCategory::IdempotencyConflict);
+    EXPECT_EQ(conflict.error().operation_id, "operation-1");
 
     auto running = journal->updateState(first.identity, "operation-1",
                                         OperationState::Running);
-    CHECK(running);
-    CHECK(running.value().state == OperationState::Running);
+    ASSERT_TRUE(running);
+    EXPECT_EQ(running.value().state, OperationState::Running);
     auto terminal_error = industrial_bus::Error::internal("algorithm failed", 73);
     terminal_error.operation_id = "operation-1";
     terminal_error.context["stage"] = "prepare";
     auto failed = journal->updateState(first.identity, "operation-1",
                                        OperationState::Failed, terminal_error);
-    CHECK(failed);
-    CHECK(failed.value().state == OperationState::Failed);
-    CHECK(failed.value().error == terminal_error);
+    ASSERT_TRUE(failed);
+    EXPECT_EQ(failed.value().state, OperationState::Failed);
+    EXPECT_EQ(failed.value().error, terminal_error);
     auto invalid_transition = journal->updateState(
         first.identity, "operation-1", OperationState::Running);
-    CHECK(!invalid_transition);
-    CHECK(invalid_transition.error().category ==
-          industrial_bus::ErrorCategory::InvalidArgument);
+    ASSERT_FALSE(invalid_transition);
+    EXPECT_EQ(invalid_transition.error().category,
+              industrial_bus::ErrorCategory::InvalidArgument);
     auto wrong_owner = journal->updateState(
         first.identity, "another-operation", OperationState::Running);
-    CHECK(!wrong_owner);
-    CHECK(wrong_owner.error().category ==
-          industrial_bus::ErrorCategory::IdempotencyConflict);
+    ASSERT_FALSE(wrong_owner);
+    EXPECT_EQ(wrong_owner.error().category,
+              industrial_bus::ErrorCategory::IdempotencyConflict);
 
     auto locked = bus_core::IdempotencyJournal::open(options);
-    CHECK(!locked);
-    CHECK(locked.error().category == industrial_bus::ErrorCategory::FileIo);
+    ASSERT_FALSE(locked);
+    EXPECT_EQ(locked.error().category, industrial_bus::ErrorCategory::FileIo);
 
     journal.reset();
     auto recovered = bus_core::IdempotencyJournal::open(options);
-    CHECK(recovered);
+    ASSERT_TRUE(recovered);
     journal = std::move(recovered.value());
-    CHECK(journal->liveRecordCount() == 1);
+    EXPECT_EQ(journal->liveRecordCount(), 1U);
     auto found = journal->find(first.identity);
-    CHECK(found);
-    CHECK(found.value().operation_id == "operation-1");
-    CHECK(found.value().state == OperationState::Failed);
-    CHECK(found.value().error == terminal_error);
+    ASSERT_TRUE(found);
+    EXPECT_EQ(found.value().operation_id, "operation-1");
+    EXPECT_EQ(found.value().state, OperationState::Failed);
+    EXPECT_EQ(found.value().error, terminal_error);
 
     bus_core::CommandRegistration second;
     second.identity = {"caller", "layout.boolean.execute", "intent-2"};
@@ -253,7 +266,7 @@ void testIdempotencyJournal() {
     second.operation_id = "operation-2";
     second.owner_service = "layout-boolean";
     second.owner_instance = "worker-1";
-    CHECK(journal->registerCommand(second));
+    ASSERT_TRUE(journal->registerCommand(second));
 
     std::atomic<int> execution_claims{0};
     std::atomic<int> claim_errors{0};
@@ -272,57 +285,35 @@ void testIdempotencyJournal() {
     for (auto& claimer : claimers) {
         claimer.join();
     }
-    CHECK(claim_errors == 0);
-    CHECK(execution_claims == 1);
+    EXPECT_EQ(claim_errors.load(), 0);
+    EXPECT_EQ(execution_claims.load(), 1);
 
     auto third = second;
     third.identity.idempotency_key = "intent-3";
     third.operation_id = "operation-3";
     auto full = journal->registerCommand(std::move(third));
-    CHECK(!full);
-    CHECK(full.error().category == industrial_bus::ErrorCategory::ResourceExhausted);
+    ASSERT_FALSE(full);
+    EXPECT_EQ(full.error().category,
+              industrial_bus::ErrorCategory::ResourceExhausted);
 
     journal.reset();
     struct stat complete_info {};
-    CHECK(::stat(path.c_str(), &complete_info) == 0);
-    const int append_fd = ::open(path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
-    CHECK(append_fd >= 0);
-    if (append_fd >= 0) {
-        const unsigned char partial[] = {0x49, 0x42, 0x4a};
-        CHECK(::write(append_fd, partial, sizeof(partial)) ==
+    ASSERT_EQ(::stat(options.path.c_str(), &complete_info), 0);
+    const int append_fd =
+        ::open(options.path.c_str(), O_WRONLY | O_APPEND | O_CLOEXEC);
+    ASSERT_GE(append_fd, 0);
+    const unsigned char partial[] = {0x49, 0x42, 0x4a};
+    EXPECT_EQ(::write(append_fd, partial, sizeof(partial)),
               static_cast<ssize_t>(sizeof(partial)));
-        ::close(append_fd);
-    }
-    auto tail_recovered = bus_core::IdempotencyJournal::open(options);
-    CHECK(tail_recovered);
-    if (tail_recovered) {
-        journal = std::move(tail_recovered.value());
-        CHECK(journal->liveRecordCount() == 2);
-        struct stat recovered_info {};
-        CHECK(::stat(path.c_str(), &recovered_info) == 0);
-        CHECK(recovered_info.st_size == complete_info.st_size);
-    }
+    EXPECT_EQ(::close(append_fd), 0);
 
-    journal.reset();
-    CHECK(::unlink(path.c_str()) == 0);
-    CHECK(::rmdir(directory) == 0);
+    auto tail_recovered = bus_core::IdempotencyJournal::open(options);
+    ASSERT_TRUE(tail_recovered);
+    journal = std::move(tail_recovered.value());
+    EXPECT_EQ(journal->liveRecordCount(), 2U);
+    struct stat recovered_info {};
+    ASSERT_EQ(::stat(options.path.c_str(), &recovered_info), 0);
+    EXPECT_EQ(recovered_info.st_size, complete_info.st_size);
 }
 
 }  // namespace
-
-int main() {
-    testResult();
-    testIdentifiers();
-    testOperationStateMachine();
-    testPriorityAndCapacity();
-    testProgressCoalescingAndEviction();
-    testCriticalOverflow();
-    testIdempotencyJournal();
-
-    if (failures != 0) {
-        std::cerr << failures << " test assertion(s) failed\n";
-        return EXIT_FAILURE;
-    }
-    std::cout << "industrial_bus_core_tests passed\n";
-    return EXIT_SUCCESS;
-}

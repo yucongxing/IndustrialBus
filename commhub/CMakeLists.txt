@@ -18,20 +18,17 @@ set_target_properties(industrial_bus_commhub_core PROPERTIES POSITION_INDEPENDEN
 if(BUILD_TESTING)
     add_executable(industrial_bus_commhub_router_test tests/router_test.cpp)
     target_link_libraries(industrial_bus_commhub_router_test
-        PRIVATE IndustrialBus::CommHubCore)
-    add_test(NAME industrial_bus_commhub_router_test
-             COMMAND industrial_bus_commhub_router_test)
+        PRIVATE IndustrialBus::CommHubCore GTest::gtest_main)
+    gtest_discover_tests(industrial_bus_commhub_router_test)
 
     add_executable(industrial_bus_commhub_qos_test tests/qos_scheduler_test.cpp)
     target_link_libraries(industrial_bus_commhub_qos_test
-        PRIVATE IndustrialBus::CommHubCore)
-    add_test(NAME industrial_bus_commhub_qos_test
-             COMMAND industrial_bus_commhub_qos_test)
+        PRIVATE IndustrialBus::CommHubCore GTest::gtest_main)
+    gtest_discover_tests(industrial_bus_commhub_qos_test)
 
     add_executable(industrial_bus_commhub_session_test
         tests/session_registry_test.cpp)
     target_link_libraries(industrial_bus_commhub_session_test
-        PRIVATE IndustrialBus::CommHubCore)
-    add_test(NAME industrial_bus_commhub_session_test
-             COMMAND industrial_bus_commhub_session_test)
+        PRIVATE IndustrialBus::CommHubCore GTest::gtest_main)
+    gtest_discover_tests(industrial_bus_commhub_session_test)
 endif()

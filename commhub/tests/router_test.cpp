@@ -1,6 +1,7 @@
 #include "industrial_bus/commhub/hub_core.h"
 
-#include <cassert>
+#include <gtest/gtest.h>
+
 #include <chrono>
 
 using namespace industrial_bus::commhub;
@@ -27,16 +28,16 @@ ServiceRegistration registration(std::string service, std::string instance) {
 
 }  // namespace
 
-int main() {
+TEST(CommHubRouterTest, RoutesRequestsRepliesEventsAndRejectsInvalidRoutes) {
     const auto now = std::chrono::steady_clock::now();
     constexpr std::int64_t unix_now = 1'000'000'000;
     HubCore hub({{{2, 2, 2, 2}}}, std::chrono::seconds(10));
 
-    assert(hub.connect(session("caller-session", "caller", "caller-1"), now));
-    assert(hub.connect(session("worker-session", "worker", "worker-1"), now));
-    assert(hub.connect(session("observer-session", "observer", "observer-1"), now));
-    assert(hub.registerService("worker-session", registration("worker", "worker-1")));
-    assert(hub.subscribe("observer-session", "worker.changed"));
+    ASSERT_TRUE(hub.connect(session("caller-session", "caller", "caller-1"), now));
+    ASSERT_TRUE(hub.connect(session("worker-session", "worker", "worker-1"), now));
+    ASSERT_TRUE(hub.connect(session("observer-session", "observer", "observer-1"), now));
+    ASSERT_TRUE(hub.registerService("worker-session", registration("worker", "worker-1")));
+    ASSERT_TRUE(hub.subscribe("observer-session", "worker.changed"));
 
     RouteMessage request;
     request.message_id = "request-1";
@@ -49,12 +50,14 @@ int main() {
     request.deadline_unix_ns = unix_now + 5'000'000'000;
 
     auto routed = hub.dispatch("caller-session", request, now, unix_now);
-    assert(routed);
-    assert(routed.return_route_stored);
-    assert(routed.targets.size() == 1 && routed.targets.front() == "worker-session");
-    assert(hub.returnRoutes().size() == 1);
+    ASSERT_TRUE(routed);
+    EXPECT_TRUE(routed.return_route_stored);
+    ASSERT_EQ(routed.targets.size(), 1U);
+    EXPECT_EQ(routed.targets.front(), "worker-session");
+    EXPECT_EQ(hub.returnRoutes().size(), 1U);
     const auto to_worker = hub.nextOutbound("worker-session");
-    assert(to_worker && to_worker->message_id == "request-1");
+    ASSERT_TRUE(to_worker.has_value());
+    EXPECT_EQ(to_worker->message_id, "request-1");
 
     RouteMessage reply;
     reply.message_id = "reply-1";
@@ -66,9 +69,11 @@ int main() {
     reply.kind = MessageKind::reply;
     reply.priority = 0;
     routed = hub.dispatch("worker-session", reply, now, unix_now);
-    assert(routed && routed.targets.front() == "caller-session");
-    assert(hub.returnRoutes().size() == 0);
-    assert(hub.nextOutbound("caller-session"));
+    ASSERT_TRUE(routed);
+    ASSERT_FALSE(routed.targets.empty());
+    EXPECT_EQ(routed.targets.front(), "caller-session");
+    EXPECT_EQ(hub.returnRoutes().size(), 0U);
+    EXPECT_TRUE(hub.nextOutbound("caller-session").has_value());
 
     RouteMessage event;
     event.message_id = "event-1";
@@ -77,19 +82,20 @@ int main() {
     event.topic = "worker.changed";
     event.kind = MessageKind::event;
     routed = hub.dispatch("worker-session", event, now, unix_now);
-    assert(routed && routed.targets.size() == 1);
-    assert(routed.targets.front() == "observer-session");
+    ASSERT_TRUE(routed);
+    ASSERT_EQ(routed.targets.size(), 1U);
+    EXPECT_EQ(routed.targets.front(), "observer-session");
 
-    assert(hub.connect(session("duplicate-session", "worker", "worker-2"), now));
+    ASSERT_TRUE(hub.connect(session("duplicate-session", "worker", "worker-2"), now));
     const auto duplicate = hub.registerService(
         "duplicate-session", registration("worker", "worker-2"));
-    assert(!duplicate);
-    assert(duplicate.error.code == HubErrorCode::service_already_registered);
+    EXPECT_FALSE(duplicate);
+    EXPECT_EQ(duplicate.error.code, HubErrorCode::service_already_registered);
 
     RouteMessage expired = request;
     expired.message_id = "expired-request";
     expired.deadline_unix_ns = unix_now;
     routed = hub.dispatch("caller-session", expired, now, unix_now);
-    assert(!routed);
-    assert(routed.status.error.code == HubErrorCode::deadline_expired);
+    EXPECT_FALSE(routed);
+    EXPECT_EQ(routed.status.error.code, HubErrorCode::deadline_expired);
 }

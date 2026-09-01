@@ -13,6 +13,8 @@ The reviewed design baseline is in
 ## Build
 
 Dependencies are installed locally and discovered with `find_package()`.
+Tests use a locally installed GoogleTest Config Package; provide its prefix
+through `CMAKE_PREFIX_PATH` when it is outside the default search path.
 
 ```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
@@ -25,5 +27,7 @@ For a dependency-free core-only build, disable the external integrations:
 ```sh
 cmake -S . -B build-core \
   -DINDUSTRIAL_BUS_ENABLE_PROTOBUF=OFF \
-  -DINDUSTRIAL_BUS_ENABLE_ZEROMQ=OFF
+  -DINDUSTRIAL_BUS_ENABLE_ZEROMQ=OFF \
+  -DBUILD_TESTING=OFF \
+  -DINDUSTRIAL_BUS_BUILD_TESTS=OFF
 ```

@@ -39,7 +39,8 @@ if(INDUSTRIAL_BUS_BUILD_TESTS)
     add_executable(industrial_bus_client_tests
         tests/client_runtime_test.cpp
     )
-    target_link_libraries(industrial_bus_client_tests PRIVATE IndustrialBus::Client)
+    target_link_libraries(industrial_bus_client_tests
+        PRIVATE IndustrialBus::Client GTest::gtest_main)
     industrial_bus_target_defaults(industrial_bus_client_tests)
-    add_test(NAME industrial_bus_client_tests COMMAND industrial_bus_client_tests)
+    gtest_discover_tests(industrial_bus_client_tests)
 endif()

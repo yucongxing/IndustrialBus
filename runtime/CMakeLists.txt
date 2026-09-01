@@ -23,9 +23,10 @@ industrial_bus_target_defaults(industrial_bus_runtime)
 if(INDUSTRIAL_BUS_BUILD_TESTS)
     add_executable(industrial_bus_runtime_e2e_test tests/runtime_e2e_test.cpp)
     target_link_libraries(industrial_bus_runtime_e2e_test
-        PRIVATE IndustrialBus::Runtime IndustrialBus::TransportLoopback)
+        PRIVATE IndustrialBus::Runtime IndustrialBus::TransportLoopback
+                GTest::gtest_main)
     industrial_bus_target_defaults(industrial_bus_runtime_e2e_test)
-    add_test(NAME industrial_bus_runtime_e2e_test COMMAND industrial_bus_runtime_e2e_test)
+    gtest_discover_tests(industrial_bus_runtime_e2e_test)
 endif()
 
 if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
@@ -42,15 +43,13 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
             tests/linux_client_start_test.cpp)
         target_link_libraries(industrial_bus_linux_client_start_test
             PRIVATE IndustrialBus::Client IndustrialBus::Bootstrap
-                    IndustrialBus::TransportZeroMQ)
+                    IndustrialBus::TransportZeroMQ GTest::gtest_main)
         target_compile_definitions(industrial_bus_linux_client_start_test
             PRIVATE
                 INDUSTRIAL_BUS_TEST_COMMHUB_PATH="$<TARGET_FILE:commhub>")
         add_dependencies(industrial_bus_linux_client_start_test commhub)
         industrial_bus_target_defaults(industrial_bus_linux_client_start_test)
-        add_test(NAME industrial_bus_linux_client_start_test
-                 COMMAND industrial_bus_linux_client_start_test)
-        set_tests_properties(industrial_bus_linux_client_start_test
-            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+        gtest_discover_tests(industrial_bus_linux_client_start_test
+            PROPERTIES TIMEOUT 15)
     endif()
 endif()

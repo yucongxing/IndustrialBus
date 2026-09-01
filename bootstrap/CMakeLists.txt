@@ -22,6 +22,7 @@ endif()
 
 if(BUILD_TESTING)
     add_executable(industrial_bus_bootstrap_test tests/bootstrap_test.cpp)
-    target_link_libraries(industrial_bus_bootstrap_test PRIVATE IndustrialBus::Bootstrap)
-    add_test(NAME industrial_bus_bootstrap_test COMMAND industrial_bus_bootstrap_test)
+    target_link_libraries(industrial_bus_bootstrap_test
+        PRIVATE IndustrialBus::Bootstrap GTest::gtest)
+    gtest_discover_tests(industrial_bus_bootstrap_test)
 endif()

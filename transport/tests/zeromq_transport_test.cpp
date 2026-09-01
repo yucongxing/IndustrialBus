@@ -1,17 +1,18 @@
 #include "industrial_bus/transport/transport.h"
 #include "zeromq_transport.h"
 
+#include <gtest/gtest.h>
+
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
-#include <iostream>
 #include <mutex>
 #include <string>
 #include <unistd.h>
 
 using namespace industrial_bus::transport;
 
-int main() {
+TEST(ZeroMqTransportTest, ExchangesFramesAndClosesPromptly) {
     const std::string socket_path =
         "/tmp/industrial_bus_zmq_" + std::to_string(static_cast<long>(::getpid())) + ".sock";
     const Endpoint endpoint{"ipc://" + socket_path};
@@ -31,42 +32,29 @@ int main() {
         });
         server = std::move(connection);
     });
-    if (!listen_result) {
-        std::cerr << "listen failed: " << listen_result.error().message << '\n';
-        if (listen_result.error().message.find("Operation not permitted") !=
+    if (!listen_result &&
+        listen_result.error().message.find("Operation not permitted") !=
             std::string::npos) {
-            // Some restricted CI/sandbox profiles deny creation of all sockets.
-            return 77;
-        }
-        return 1;
+        GTEST_SKIP() << "sandbox denies socket creation: "
+                     << listen_result.error().message;
     }
+    ASSERT_TRUE(listen_result) << listen_result.error().message;
 
     ZeroMqDealerConnector connector;
     auto connected = connector.connect(endpoint).get();
-    if (!connected) {
-        std::cerr << "connect failed: " << connected.error().message << '\n';
-        return 1;
-    }
+    ASSERT_TRUE(connected) << connected.error().message;
     auto client = std::move(connected).value();
     const ByteBuffer payload{9, 8, 7};
-    if (!client->send(ByteView(payload))) {
-        std::cerr << "client send failed\n";
-        return 1;
-    }
+    const auto client_send = client->send(ByteView(payload));
+    ASSERT_TRUE(client_send) << client_send.error().message;
 
     {
         std::unique_lock<std::mutex> lock(mutex);
-        if (!ready.wait_for(lock, std::chrono::seconds(2), [&] {
-                return server_received == payload;
-            })) {
-            std::cerr << "server receive timed out\n";
-            return 1;
-        }
+        ASSERT_TRUE(ready.wait_for(lock, std::chrono::seconds(2), [&] {
+            return server_received == payload;
+        })) << "server receive timed out";
     }
-    if (!server) {
-        std::cerr << "server peer was not accepted\n";
-        return 1;
-    }
+    ASSERT_NE(server, nullptr) << "server peer was not accepted";
 
     ByteBuffer client_received;
     client->setReceiveHandler([&](ByteBuffer frame) {
@@ -76,27 +64,19 @@ int main() {
         }
         ready.notify_all();
     });
-    if (!server->send(ByteView(payload))) {
-        std::cerr << "server send failed\n";
-        return 1;
-    }
+    const auto server_send = server->send(ByteView(payload));
+    ASSERT_TRUE(server_send) << server_send.error().message;
     {
         std::unique_lock<std::mutex> lock(mutex);
-        if (!ready.wait_for(lock, std::chrono::seconds(2), [&] {
-                return client_received == payload;
-            })) {
-            std::cerr << "client receive timed out\n";
-            return 1;
-        }
+        ASSERT_TRUE(ready.wait_for(lock, std::chrono::seconds(2), [&] {
+            return client_received == payload;
+        })) << "client receive timed out";
     }
 
     const auto close_started = std::chrono::steady_clock::now();
     listener.close();
     const auto close_elapsed = std::chrono::steady_clock::now() - close_started;
-    if (close_elapsed >= std::chrono::seconds(1)) {
-        std::cerr << "listener close exceeded one second\n";
-        return 1;
-    }
+    EXPECT_LT(close_elapsed, std::chrono::seconds(1));
     client->close();
     std::remove(socket_path.c_str());
 }
