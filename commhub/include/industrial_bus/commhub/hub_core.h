@@ -4,6 +4,7 @@
 #include "industrial_bus/commhub/qos_scheduler.h"
 
 #include <chrono>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -43,6 +44,9 @@ public:
     QoSScheduler& qos() noexcept { return qos_; }
 
 private:
+    bool disconnectUnlocked(const SessionId& session_id);
+
+    mutable std::mutex mutex_;
     SessionRegistry sessions_;
     ServiceRegistry services_;
     ReturnRouteTable return_routes_;

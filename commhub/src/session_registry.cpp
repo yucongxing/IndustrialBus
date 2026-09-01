@@ -69,17 +69,21 @@ std::vector<Session> SessionRegistry::snapshot() const {
     return sessions;
 }
 
-std::vector<SessionId> SessionRegistry::stale(std::chrono::milliseconds timeout,
-                                              SteadyTime now) const {
+std::vector<SessionId> SessionRegistry::removeStale(
+    std::chrono::milliseconds timeout,
+    SteadyTime now) {
     std::vector<SessionId> sessions;
     if (timeout <= std::chrono::milliseconds::zero()) {
         return sessions;
     }
     const auto cutoff = now - timeout;
     std::lock_guard<std::mutex> lock(mutex_);
-    for (const auto& entry : sessions_) {
-        if (entry.second.last_heartbeat <= cutoff) {
-            sessions.push_back(entry.first);
+    for (auto entry = sessions_.begin(); entry != sessions_.end();) {
+        if (entry->second.last_heartbeat <= cutoff) {
+            sessions.push_back(entry->first);
+            entry = sessions_.erase(entry);
+        } else {
+            ++entry;
         }
     }
     return sessions;
