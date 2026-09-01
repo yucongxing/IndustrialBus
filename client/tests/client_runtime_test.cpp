@@ -5,6 +5,7 @@
 
 #include "system.pb.h"
 
+#include <algorithm>
 #include <cassert>
 #include <chrono>
 #include <cstdint>
@@ -51,6 +52,24 @@ public:
         return {};
     }
 
+    Result<void> subscribe(const std::string& topic) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        subscribed_topics.push_back(topic);
+        if (fail_subscribe) {
+            return Error::resourceExhausted("injected subscribe failure");
+        }
+        return {};
+    }
+
+    Result<void> unsubscribe(const std::string& topic) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        unsubscribed_topics.push_back(topic);
+        if (fail_unsubscribe) {
+            return Error::connectionLost("injected unsubscribe failure");
+        }
+        return {};
+    }
+
     void setReceiveHandler(ReceiveHandler handler) override {
         receive_handler = std::move(handler);
     }
@@ -77,6 +96,18 @@ public:
         return sent.size();
     }
 
+    std::size_t subscribeCount(const std::string& topic) const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<std::size_t>(
+            std::count(subscribed_topics.begin(), subscribed_topics.end(), topic));
+    }
+
+    std::size_t unsubscribeCount(const std::string& topic) const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<std::size_t>(
+            std::count(unsubscribed_topics.begin(), unsubscribed_topics.end(), topic));
+    }
+
     void deliver(client::InboundMessage message) {
         if (receive_handler) {
             receive_handler(std::move(message));
@@ -92,10 +123,14 @@ public:
 
     mutable std::mutex mutex;
     std::vector<client::OutboundMessage> sent;
+    std::vector<std::string> subscribed_topics;
+    std::vector<std::string> unsubscribed_topics;
     ReceiveHandler receive_handler;
     ConnectionHandler connection_handler;
     ConnectionState current_state{ConnectionState::Disconnected};
     std::uint64_t current_generation{1};
+    bool fail_subscribe{false};
+    bool fail_unsubscribe{false};
 };
 
 void testPendingTableTimeoutAndLateReply() {
@@ -147,6 +182,7 @@ void testClientLifecycle() {
     int callbacks = 0;
     auto subscription = bus->subscribe(
         event_topic, [&](const std::string&) { ++callbacks; }, executor);
+    assert(adapter->subscribeCount("test.event") == 1);
     client::InboundMessage event;
     event.kind = client::MessageKind::Event;
     event.topic = "test.event";
@@ -155,6 +191,7 @@ void testClientLifecycle() {
     adapter->deliver(event);
     assert(executor->tasks.size() == 1);
     subscription.cancel();
+    assert(adapter->unsubscribeCount("test.event") == 1);
     executor->runAll();
     assert(callbacks == 0);  // A queued callback must observe cancellation.
 
@@ -163,11 +200,34 @@ void testClientLifecycle() {
             assert(value == "payload");
             ++callbacks;
         }, executor);
+    assert(adapter->subscribeCount("test.event") == 2);
+    auto same_topic = bus->subscribe(
+        event_topic, [&](const std::string&) { ++callbacks; }, executor);
+    assert(same_topic);
+    assert(adapter->subscribeCount("test.event") == 2);
+    same_topic.cancel();
+    assert(adapter->unsubscribeCount("test.event") == 1);
     adapter->deliver(event);
     executor->runAll();
     assert(callbacks == 1);
     Subscription moved = std::move(active);
     assert(!active && moved);
+
+    adapter->fail_subscribe = true;
+    const EventTopic<std::string> failed_topic{"test.failed", "test.String"};
+    auto failed_subscription = bus->subscribe(
+        failed_topic, [&](const std::string&) { ++callbacks; }, executor);
+    assert(!failed_subscription);
+    assert(adapter->subscribeCount("test.failed") == 1);
+    adapter->fail_subscribe = false;
+    auto retried_subscription = bus->subscribe(
+        failed_topic, [&](const std::string&) { ++callbacks; }, executor);
+    assert(retried_subscription);
+    assert(adapter->subscribeCount("test.failed") == 2);
+    adapter->fail_unsubscribe = true;
+    retried_subscription.cancel();
+    assert(adapter->unsubscribeCount("test.failed") == 1);
+    adapter->fail_unsubscribe = false;
 
     const RequestTopic<std::string, std::string> request_topic{
         "test.request", "test.StringRequest", "test.StringReply"};
@@ -195,6 +255,7 @@ void testClientLifecycle() {
                                        std::string("restart"),
                                        std::chrono::seconds(1));
     adapter->changeGeneration(2);
+    assert(adapter->subscribeCount("test.event") == 3);
     auto restart_result = restart_future.get();
     assert(!restart_result);
     assert(restart_result.error().category == ErrorCategory::HubRestarted);
@@ -386,6 +447,7 @@ void testClientLifecycle() {
 
     assert(bus->services().size() == 1);
     assert(bus->shutdown(std::chrono::milliseconds(10)));
+    assert(adapter->unsubscribeCount("test.event") == 2);
     assert(bus->connectionState() == ConnectionState::Disconnected);
     assert(bus->shutdown(std::chrono::milliseconds(10)));
     assert(::unlink(journal_path.c_str()) == 0);

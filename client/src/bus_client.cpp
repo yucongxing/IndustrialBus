@@ -47,6 +47,10 @@ struct SubscriptionEntry {
 
 class SubscriptionRegistry : public std::enable_shared_from_this<SubscriptionRegistry> {
 public:
+    explicit SubscriptionRegistry(
+        std::shared_ptr<client::IRuntimeAdapter> adapter)
+        : adapter_(std::move(adapter)) {}
+
     Subscription add(std::string topic,
                      std::string payload_type,
                      std::function<void(const ByteBuffer&)> handler,
@@ -56,19 +60,28 @@ public:
         entry->handler = std::move(handler);
         entry->executor = std::move(executor);
 
+        const auto key = topic;
         std::uint64_t id;
         {
             std::lock_guard<std::mutex> lock(mutex_);
             if (stopping_) {
                 return {};
             }
+            auto& by_id = entries_[key];
+            if (by_id.empty()) {
+                const auto subscribed = adapter_->subscribe(key);
+                if (!subscribed) {
+                    entries_.erase(key);
+                    return {};
+                }
+            }
             id = next_id_++;
-            entries_[std::move(topic)].emplace(id, entry);
+            by_id.emplace(id, entry);
         }
         std::weak_ptr<SubscriptionRegistry> weak = shared_from_this();
-        return Subscription([weak, id] {
+        return Subscription([weak, key, id] {
             if (auto registry = weak.lock()) {
-                registry->cancel(id);
+                registry->cancel(key, id);
             }
         });
     }
@@ -118,6 +131,7 @@ public:
                 for (auto& item : by_topic.second) {
                     entries.push_back(item.second);
                 }
+                (void)adapter_->unsubscribe(by_topic.first);
             }
             entries_.clear();
         }
@@ -128,29 +142,41 @@ public:
         }
     }
 
+    void resubscribeAll() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) {
+            return;
+        }
+        for (const auto& by_topic : entries_) {
+            (void)adapter_->subscribe(by_topic.first);
+        }
+    }
+
 public:
     // Kept explicit instead of making the registry part of the public API.
-    static std::shared_ptr<SubscriptionRegistry> create() {
-        struct SharedRegistry final : SubscriptionRegistry {};
-        return std::make_shared<SharedRegistry>();
+    static std::shared_ptr<SubscriptionRegistry> create(
+        std::shared_ptr<client::IRuntimeAdapter> adapter) {
+        return std::make_shared<SubscriptionRegistry>(std::move(adapter));
     }
 
 private:
-    void cancel(std::uint64_t id) noexcept {
+    void cancel(const std::string& topic, std::uint64_t id) noexcept {
         std::shared_ptr<SubscriptionEntry> removed;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            for (auto topic_it = entries_.begin(); topic_it != entries_.end(); ++topic_it) {
-                auto item = topic_it->second.find(id);
-                if (item == topic_it->second.end()) {
-                    continue;
-                }
-                removed = std::move(item->second);
-                topic_it->second.erase(item);
-                if (topic_it->second.empty()) {
-                    entries_.erase(topic_it);
-                }
-                break;
+            const auto topic_it = entries_.find(topic);
+            if (topic_it == entries_.end()) {
+                return;
+            }
+            const auto item = topic_it->second.find(id);
+            if (item == topic_it->second.end()) {
+                return;
+            }
+            removed = std::move(item->second);
+            topic_it->second.erase(item);
+            if (topic_it->second.empty()) {
+                (void)adapter_->unsubscribe(topic_it->first);
+                entries_.erase(topic_it);
             }
         }
         if (removed) {
@@ -164,6 +190,7 @@ private:
     std::unordered_map<std::string,
                        std::unordered_map<std::uint64_t, std::shared_ptr<SubscriptionEntry>>>
         entries_;
+    std::shared_ptr<client::IRuntimeAdapter> adapter_;
     std::uint64_t next_id_{1};
     bool stopping_{false};
 };
@@ -561,7 +588,7 @@ public:
           executor(std::make_shared<client::DefaultExecutor>(options.callback_threads)),
           state(std::make_shared<CallbackState>()) {
         state->pending = std::make_shared<client::PendingRequestTable>();
-        state->subscriptions = SubscriptionRegistry::create();
+        state->subscriptions = SubscriptionRegistry::create(adapter);
         state->service_handlers = ServiceHandlerRegistry::create(
             options.idempotency_journal,
             adapter ? adapter->localService() : ServiceInfo{});
@@ -609,6 +636,7 @@ public:
                     generation != previous) {
                     current->pending->failAll(
                         Error::hubRestarted("CommHub connection generation changed"));
+                    current->subscriptions->resubscribeAll();
                 }
             });
         auto result = adapter->start();
@@ -692,10 +720,6 @@ Subscription BusClient::subscribeRaw(std::string topic,
     }
     if (!executor) {
         executor = impl_->executor;
-    }
-    const auto subscription_result = impl_->adapter->subscribe(topic);
-    if (!subscription_result) {
-        return {};
     }
     return impl_->state->subscriptions->add(std::move(topic), std::move(payload_type),
                                              std::move(handler), std::move(executor));
