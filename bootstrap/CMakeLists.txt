@@ -1,5 +1,6 @@
 add_library(industrial_bus_bootstrap STATIC
     src/endpoint_record.cpp
+    src/hub_launcher.cpp
     src/hub_lock.cpp
     src/runtime_paths.cpp
     src/secure_files.cpp
@@ -13,6 +14,7 @@ target_include_directories(industrial_bus_bootstrap
         $<INSTALL_INTERFACE:include>
 )
 set_target_properties(industrial_bus_bootstrap PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(industrial_bus_bootstrap PUBLIC Threads::Threads)
 
 if(COMMAND industrial_bus_target_defaults)
     industrial_bus_target_defaults(industrial_bus_bootstrap)

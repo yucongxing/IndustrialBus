@@ -1,16 +1,20 @@
 #include "industrial_bus/bootstrap/endpoint_record.h"
+#include "industrial_bus/bootstrap/hub_launcher.h"
 #include "industrial_bus/bootstrap/hub_lock.h"
 #include "industrial_bus/bootstrap/runtime_paths.h"
 
 #include <cerrno>
+#include <chrono>
 #include <cstdlib>
 #include <fcntl.h>
 #include <functional>
 #include <iostream>
+#include <limits.h>
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
 
 namespace {
@@ -156,9 +160,54 @@ void rejectsLongSocketPath() {
     ::rmdir(child.c_str());
 }
 
+std::string currentExecutable() {
+    std::string path(PATH_MAX, '\0');
+    const auto length = ::readlink("/proc/self/exe", path.data(), path.size());
+    require(length > 0 && static_cast<std::size_t>(length) < path.size(),
+            "read current executable path failed");
+    path.resize(static_cast<std::size_t>(length));
+    return path;
+}
+
+void launcherTransfersLockWithoutGap() {
+    TempDirectory temp;
+    require(::setenv("XDG_RUNTIME_DIR", temp.path().c_str(), 1) == 0,
+            "set launcher XDG_RUNTIME_DIR failed");
+    const auto paths = industrial_bus::bootstrap::RuntimePaths::fromEnvironment();
+    auto lock = industrial_bus::bootstrap::HubLock::tryAcquire(paths);
+    require(lock.has_value(), "launcher failed to acquire startup lock");
+    const auto child = industrial_bus::bootstrap::launchCommHub(
+        paths, std::move(*lock), currentExecutable());
+    require(child > 0, "launcher returned invalid child pid");
+    require(!industrial_bus::bootstrap::HubLock::tryAcquire(paths).has_value(),
+            "startup lock had a parent-to-child ownership gap");
+
+    std::optional<industrial_bus::bootstrap::HubLock> reacquired;
+    for (int attempt = 0; attempt < 100 && !reacquired; ++attempt) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        reacquired = industrial_bus::bootstrap::HubLock::tryAcquire(paths);
+    }
+    require(reacquired.has_value(), "startup lock was not released after child exit");
+    ::unsetenv("XDG_RUNTIME_DIR");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
+    if (argc == 2 &&
+        std::string(argv[1]).rfind("--startup-lock-fd=", 0) == 0) {
+        try {
+            const auto paths =
+                industrial_bus::bootstrap::RuntimePaths::fromEnvironment();
+            const auto separator = std::string(argv[1]).find('=');
+            auto lock = industrial_bus::bootstrap::HubLock::adoptInherited(
+                paths, std::stoi(std::string(argv[1]).substr(separator + 1)));
+            std::this_thread::sleep_for(std::chrono::milliseconds(250));
+            return lock.descriptor() >= 0 ? 0 : 1;
+        } catch (const std::exception&) {
+            return 1;
+        }
+    }
     if (argc == 4 && std::string(argv[1]) == "--adopt-lock") {
         try {
             const auto paths =
@@ -174,6 +223,7 @@ int main(int argc, char** argv) {
         happyPath();
         rejectsUnsafePathsAndFiles();
         rejectsLongSocketPath();
+        launcherTransfersLockWithoutGap();
         std::cout << "bootstrap tests passed\n";
         return 0;
     } catch (const std::exception& error) {
