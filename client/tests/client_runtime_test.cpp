@@ -100,6 +100,15 @@ public:
         return sent.size();
     }
 
+    std::size_t sentCount(client::MessageKind kind) const {
+        std::lock_guard<std::mutex> lock(mutex);
+        return static_cast<std::size_t>(
+            std::count_if(sent.begin(), sent.end(),
+                          [kind](const client::OutboundMessage& message) {
+                              return message.kind == kind;
+                          }));
+    }
+
     std::size_t subscribeCount(const std::string& topic) const {
         std::lock_guard<std::mutex> lock(mutex);
         return static_cast<std::size_t>(
@@ -118,11 +127,16 @@ public:
         }
     }
 
-    void changeGeneration(std::uint64_t generation) {
+    void emitConnection(ConnectionState state, std::uint64_t generation) {
+        current_state = state;
         current_generation = generation;
         if (connection_handler) {
-            connection_handler(ConnectionState::Connected, generation);
+            connection_handler(state, generation);
         }
+    }
+
+    void changeGeneration(std::uint64_t generation) {
+        emitConnection(ConnectionState::Connected, generation);
     }
 
     mutable std::mutex mutex;
@@ -153,6 +167,63 @@ TEST(PendingRequestTableTest, TimesOutAndCountsLateReply) {
     EXPECT_TRUE(timed_out);
     EXPECT_TRUE(!table.complete("request-1", "reply.type", ByteBuffer{}));
     EXPECT_TRUE(table.lateReplyCount() == 1);
+}
+
+TEST(BusClientTest,
+     RestoresSubscriptionsAndFailsPendingOperationsWithoutReplayOnGenerationChange) {
+    auto adapter = std::make_shared<FakeAdapter>();
+    ClientOptions options;
+    options.service_name = "reconnect-policy-client";
+    options.runtime_adapter = adapter;
+    auto connected = BusClient::connect(options);
+    ASSERT_TRUE(connected) << connected.error().message;
+    auto bus = connected.value();
+
+    const EventTopic<std::string> event_topic{"reconnect.event", "test.String"};
+    auto subscription = bus->subscribe(event_topic, [](const std::string&) {});
+    ASSERT_TRUE(subscription);
+    ASSERT_EQ(adapter->subscribeCount("reconnect.event"), 1U);
+
+    const RequestTopic<std::string, std::string> request_topic{
+        "reconnect.request", "test.StringRequest", "test.StringReply"};
+    auto request = bus->request(Destination{"worker", {}}, request_topic,
+                                std::string("question"),
+                                std::chrono::seconds(5));
+
+    const CommandTopic<std::string, system::v1::CommandAck> command_topic{
+        "reconnect.command", "test.StringCommand",
+        "industrial_bus.system.v1.CommandAck"};
+    CommandOptions command_options;
+    command_options.idempotency_key = "reconnect-intent";
+    command_options.accept_timeout = std::chrono::seconds(5);
+    auto command = bus->command(Destination{"worker", {}}, command_topic,
+                                std::string("run"), command_options);
+
+    ASSERT_EQ(adapter->sentCount(client::MessageKind::Request), 1U);
+    ASSERT_EQ(adapter->sentCount(client::MessageKind::Command), 1U);
+
+    adapter->emitConnection(ConnectionState::Disconnected, 1);
+    EXPECT_EQ(bus->connectionState(), ConnectionState::Disconnected);
+    adapter->emitConnection(ConnectionState::Connected, 2);
+
+    EXPECT_EQ(bus->connectionState(), ConnectionState::Connected);
+    EXPECT_EQ(adapter->subscribeCount("reconnect.event"), 2U);
+    EXPECT_EQ(adapter->sentCount(client::MessageKind::Request), 1U);
+    EXPECT_EQ(adapter->sentCount(client::MessageKind::Command), 1U);
+
+    ASSERT_EQ(request.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::ready);
+    const auto request_result = request.get();
+    ASSERT_FALSE(request_result);
+    EXPECT_EQ(request_result.error().category, ErrorCategory::HubRestarted);
+
+    ASSERT_EQ(command.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::ready);
+    const auto command_result = command.get();
+    ASSERT_FALSE(command_result);
+    EXPECT_EQ(command_result.error().category, ErrorCategory::HubRestarted);
+
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
 }
 
 TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
