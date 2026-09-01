@@ -44,6 +44,15 @@ bool HubCore::unsubscribe(const SessionId& session_id, const std::string& topic)
     return sessions_.unsubscribe(session_id, topic);
 }
 
+std::vector<SessionId> HubCore::expireSessions(std::chrono::milliseconds timeout,
+                                               SteadyTime now) {
+    auto expired = sessions_.stale(timeout, now);
+    for (const auto& session_id : expired) {
+        disconnect(session_id);
+    }
+    return expired;
+}
+
 RouteDecision HubCore::dispatch(const SessionId& source_session,
                                 const RouteMessage& message,
                                 SteadyTime now,

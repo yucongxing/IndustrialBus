@@ -27,4 +27,11 @@ if(BUILD_TESTING)
         PRIVATE IndustrialBus::CommHubCore)
     add_test(NAME industrial_bus_commhub_qos_test
              COMMAND industrial_bus_commhub_qos_test)
+
+    add_executable(industrial_bus_commhub_session_test
+        tests/session_registry_test.cpp)
+    target_link_libraries(industrial_bus_commhub_session_test
+        PRIVATE IndustrialBus::CommHubCore)
+    add_test(NAME industrial_bus_commhub_session_test
+             COMMAND industrial_bus_commhub_session_test)
 endif()

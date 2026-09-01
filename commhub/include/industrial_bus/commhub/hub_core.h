@@ -5,6 +5,7 @@
 
 #include <chrono>
 #include <optional>
+#include <vector>
 
 namespace industrial_bus::commhub {
 
@@ -24,6 +25,9 @@ public:
                               ServiceRegistration registration);
     HubStatus subscribe(const SessionId& session_id, std::string topic);
     bool unsubscribe(const SessionId& session_id, const std::string& topic);
+    std::vector<SessionId> expireSessions(
+        std::chrono::milliseconds timeout,
+        SteadyTime now = std::chrono::steady_clock::now());
 
     RouteDecision dispatch(const SessionId& source_session,
                            const RouteMessage& message,

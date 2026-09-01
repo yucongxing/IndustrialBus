@@ -69,6 +69,22 @@ std::vector<Session> SessionRegistry::snapshot() const {
     return sessions;
 }
 
+std::vector<SessionId> SessionRegistry::stale(std::chrono::milliseconds timeout,
+                                              SteadyTime now) const {
+    std::vector<SessionId> sessions;
+    if (timeout <= std::chrono::milliseconds::zero()) {
+        return sessions;
+    }
+    const auto cutoff = now - timeout;
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : sessions_) {
+        if (entry.second.last_heartbeat <= cutoff) {
+            sessions.push_back(entry.first);
+        }
+    }
+    return sessions;
+}
+
 std::vector<SessionId> SessionRegistry::subscribers(const std::string& topic,
                                                     const SessionId& excluding) const {
     std::vector<SessionId> result;

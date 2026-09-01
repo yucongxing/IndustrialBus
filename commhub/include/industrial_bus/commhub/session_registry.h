@@ -20,6 +20,8 @@ public:
 
     std::optional<Session> find(const SessionId& session_id) const;
     std::vector<Session> snapshot() const;
+    std::vector<SessionId> stale(std::chrono::milliseconds timeout,
+                                 SteadyTime now = std::chrono::steady_clock::now()) const;
     std::vector<SessionId> subscribers(const std::string& topic,
                                        const SessionId& excluding = {}) const;
 
