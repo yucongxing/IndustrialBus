@@ -10,6 +10,7 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 namespace {
@@ -62,7 +63,42 @@ void happyPath() {
     require((::fcntl(lock->descriptor(), F_GETFD) & FD_CLOEXEC) != 0, "lock does not start CLOEXEC");
     lock->makeInheritableForExec();
     require((::fcntl(lock->descriptor(), F_GETFD) & FD_CLOEXEC) == 0, "lock did not become inheritable");
+    const pid_t child = ::fork();
+    require(child >= 0, "fork inherited-lock test failed");
+    if (child == 0) {
+        const std::string descriptor = std::to_string(lock->descriptor());
+        ::execl("/proc/self/exe", "industrial_bus_bootstrap_test",
+                "--adopt-lock", temp.path().c_str(), descriptor.c_str(), nullptr);
+        ::_exit(127);
+    }
+    int child_status = 0;
+    require(::waitpid(child, &child_status, 0) == child,
+            "wait inherited-lock child failed");
+    require(WIFEXITED(child_status) && WEXITSTATUS(child_status) == 0,
+            "inherited-lock child failed to adopt descriptor");
     lock->setCloseOnExec();
+
+    const int inherited_fd = ::dup(lock->descriptor());
+    require(inherited_fd >= 0, "duplicate lock fd failed");
+    {
+        auto inherited =
+            industrial_bus::bootstrap::HubLock::adoptInherited(paths, inherited_fd);
+        require((::fcntl(inherited.descriptor(), F_GETFD) & FD_CLOEXEC) != 0,
+                "adopted lock did not restore CLOEXEC");
+    }
+
+    const std::string wrong_path = temp.path() + "/wrong.lock";
+    const int wrong_fd = ::open(wrong_path.c_str(), O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    require(wrong_fd >= 0, "create wrong inherited lock failed");
+    requireThrows(
+        [&] {
+            auto wrong =
+                industrial_bus::bootstrap::HubLock::adoptInherited(paths, wrong_fd);
+            (void)wrong;
+        },
+        "descriptor for another inode was accepted");
+    ::close(wrong_fd);
+    ::unlink(wrong_path.c_str());
 
     const auto token = industrial_bus::bootstrap::generateAuthToken();
     require(token.size() == 64, "token size is wrong");
@@ -122,7 +158,18 @@ void rejectsLongSocketPath() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 4 && std::string(argv[1]) == "--adopt-lock") {
+        try {
+            const auto paths =
+                industrial_bus::bootstrap::RuntimePaths::fromXdgRuntimeDir(argv[2]);
+            auto lock = industrial_bus::bootstrap::HubLock::adoptInherited(
+                paths, std::stoi(argv[3]));
+            return lock.descriptor() >= 0 ? 0 : 1;
+        } catch (const std::exception&) {
+            return 1;
+        }
+    }
     try {
         happyPath();
         rejectsUnsafePathsAndFiles();

@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <stdexcept>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 namespace industrial_bus::bootstrap {
@@ -30,6 +31,41 @@ std::optional<HubLock> HubLock::tryAcquire(const RuntimePaths& paths) {
         internal::closeNoThrow(fd);
         throw;
     }
+}
+
+HubLock HubLock::adoptInherited(const RuntimePaths& paths, int fd) {
+    if (fd < 0) {
+        throw std::invalid_argument("inherited commhub.lock descriptor is invalid");
+    }
+    struct stat inherited {};
+    if (::fstat(fd, &inherited) != 0) {
+        internal::throwErrno("inspect inherited commhub.lock descriptor");
+    }
+    internal::validatePrivateRegularFileFd(fd, "inherited commhub.lock");
+
+    const int directory_fd = paths.openRuntimeDirectory();
+    struct stat expected {};
+    const int inspected = ::fstatat(directory_fd, "commhub.lock", &expected,
+                                    AT_SYMLINK_NOFOLLOW);
+    const int inspect_errno = errno;
+    internal::closeNoThrow(directory_fd);
+    if (inspected != 0) {
+        errno = inspect_errno;
+        internal::throwErrno("inspect expected commhub.lock");
+    }
+    if (!S_ISREG(expected.st_mode) || expected.st_dev != inherited.st_dev ||
+        expected.st_ino != inherited.st_ino) {
+        throw std::invalid_argument(
+            "inherited descriptor does not reference this runtime's commhub.lock");
+    }
+    if (::flock(fd, LOCK_EX | LOCK_NB) != 0) {
+        internal::throwErrno("confirm inherited commhub.lock ownership");
+    }
+    const int flags = ::fcntl(fd, F_GETFD);
+    if (flags < 0 || ::fcntl(fd, F_SETFD, flags | FD_CLOEXEC) != 0) {
+        internal::throwErrno("restore CLOEXEC on inherited commhub.lock");
+    }
+    return HubLock(fd);
 }
 
 HubLock::~HubLock() { internal::closeNoThrow(fd_); }
