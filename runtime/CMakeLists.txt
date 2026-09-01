@@ -27,6 +27,15 @@ if(INDUSTRIAL_BUS_BUILD_TESTS)
                 GTest::gtest_main)
     industrial_bus_target_defaults(industrial_bus_runtime_e2e_test)
     gtest_discover_tests(industrial_bus_runtime_e2e_test)
+
+    add_executable(industrial_bus_runtime_heartbeat_test
+        tests/heartbeat_test.cpp)
+    target_link_libraries(industrial_bus_runtime_heartbeat_test
+        PRIVATE IndustrialBus::Runtime IndustrialBus::TransportLoopback
+                GTest::gtest_main)
+    industrial_bus_target_defaults(industrial_bus_runtime_heartbeat_test)
+    gtest_discover_tests(industrial_bus_runtime_heartbeat_test
+        PROPERTIES TIMEOUT 5)
 endif()
 
 if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)

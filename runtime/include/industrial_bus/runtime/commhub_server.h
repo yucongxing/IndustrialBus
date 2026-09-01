@@ -4,20 +4,29 @@
 #include "industrial_bus/result.h"
 #include "industrial_bus/transport/transport.h"
 
+#include <chrono>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
 namespace industrial_bus::runtime {
+
+struct CommHubServerOptions {
+    std::chrono::milliseconds heartbeat_timeout{std::chrono::seconds(6)};
+    std::chrono::milliseconds sweep_interval{std::chrono::milliseconds(500)};
+};
 
 class CommHubServer {
 public:
     CommHubServer(std::shared_ptr<transport::IListener> listener,
                   transport::Endpoint endpoint,
                   std::string hub_instance_id = {},
-                  std::string auth_token = {});
+                  std::string auth_token = {},
+                  CommHubServerOptions options = {});
     ~CommHubServer();
 
     Result<void> start();
@@ -33,6 +42,10 @@ private:
                               const transport::ByteBuffer& frame);
     Result<void> updateSubscription(const std::shared_ptr<Peer>& peer,
                                     const transport::ByteBuffer& frame);
+    Result<void> handleHeartbeat(const std::shared_ptr<Peer>& peer,
+                                 const transport::ByteBuffer& frame);
+    void maintenanceLoop();
+    void expireStaleSessions();
     void drain(const std::vector<commhub::SessionId>& targets);
     void sendRouteError(const std::shared_ptr<Peer>& peer,
                         const transport::ByteBuffer& request,
@@ -42,11 +55,16 @@ private:
     transport::Endpoint endpoint_;
     std::string hub_instance_id_;
     std::string auth_token_;
+    CommHubServerOptions options_;
     commhub::HubCore core_;
+    std::mutex lifecycle_mutex_;
     std::mutex mutex_;
+    std::condition_variable maintenance_cv_;
+    std::thread maintenance_thread_;
     std::vector<std::shared_ptr<Peer>> peers_;
     std::unordered_map<commhub::SessionId, std::shared_ptr<Peer>> sessions_;
     bool started_{false};
+    bool maintenance_stop_{false};
 };
 
 }  // namespace industrial_bus::runtime

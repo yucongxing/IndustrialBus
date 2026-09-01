@@ -55,9 +55,11 @@ public:
     Result<void> start() override {
         if (options_.service_name.empty() || options_.node_id.empty() ||
             options_.service_version.empty() ||
-            options_.startup_timeout <= Duration::zero()) {
+            options_.startup_timeout <= Duration::zero() ||
+            options_.heartbeat_interval <= Duration::zero() ||
+            options_.heartbeat_timeout < options_.heartbeat_interval * 2) {
             return Error::invalidArgument(
-                "local runtime requires service identity and a positive startup timeout");
+                "local runtime requires valid identity, startup and heartbeat timing");
         }
         if (options_.startup_mode == HubStartupMode::EmbeddedForTest) {
             return Error::invalidArgument(
@@ -256,6 +258,8 @@ private:
         runtime_options.expected_hub_instance_id = endpoint.hub_instance_id;
         runtime_options.expected_protocol_version = endpoint.protocol_version;
         runtime_options.handshake_timeout = handshake_timeout;
+        runtime_options.heartbeat_interval = options_.heartbeat_interval;
+        runtime_options.heartbeat_timeout = options_.heartbeat_timeout;
         auto runtime_adapter =
             std::make_shared<runtime::TransportRuntimeAdapter>(
                 std::move(runtime_options));

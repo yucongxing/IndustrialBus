@@ -36,6 +36,8 @@ struct ClientOptions {
     std::string service_version{"0.1.0"};
     HubStartupMode startup_mode{HubStartupMode::AutoStart};
     Duration startup_timeout{std::chrono::seconds(5)};
+    Duration heartbeat_interval{std::chrono::seconds(2)};
+    Duration heartbeat_timeout{std::chrono::seconds(6)};
     std::string hub_executable;
     std::size_t callback_threads{1};
     std::size_t outbound_capacity{1024};

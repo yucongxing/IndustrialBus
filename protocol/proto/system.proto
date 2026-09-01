@@ -75,6 +75,14 @@ message SubscriptionAck {
 
 message Heartbeat {
   int64 sent_at_unix_ns = 1;
+  uint64 sequence = 2;
+}
+
+message HeartbeatAck {
+  int64 sent_at_unix_ns = 1;
+  int64 received_at_unix_ns = 2;
+  uint64 sequence = 3;
+  string hub_instance_id = 4;
 }
 
 message ServiceDisconnected {

@@ -9,6 +9,9 @@ their own executor when callbacks must run on the UI thread.
 
 The reviewed design baseline is in
 [`industrial-bus-development-guide.md`](industrial-bus-development-guide.md).
+Implementation-facing module documentation is maintained in
+[`docs/`](docs/README.md) and must be updated with responsibility or lifecycle
+changes.
 
 ## Build
 

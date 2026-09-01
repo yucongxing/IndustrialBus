@@ -6,6 +6,7 @@
 #include "envelope.pb.h"
 #include "system.pb.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <string>
@@ -83,18 +84,24 @@ struct CommHubServer::Peer {
 CommHubServer::CommHubServer(std::shared_ptr<transport::IListener> listener,
                              transport::Endpoint endpoint,
                              std::string hub_instance_id,
-                             std::string auth_token)
+                             std::string auth_token,
+                             CommHubServerOptions options)
     : listener_(std::move(listener)),
       endpoint_(std::move(endpoint)),
       hub_instance_id_(hub_instance_id.empty() ? generateUuidV4()
                                                 : std::move(hub_instance_id)),
-      auth_token_(std::move(auth_token)) {}
+      auth_token_(std::move(auth_token)),
+      options_(options) {}
 
 CommHubServer::~CommHubServer() { stop(); }
 
 Result<void> CommHubServer::start() {
-    if (!listener_ || endpoint_.empty()) {
-        return Error::invalidArgument("CommHubServer requires listener and endpoint");
+    if (!listener_ || endpoint_.empty() ||
+        options_.heartbeat_timeout <= std::chrono::milliseconds::zero() ||
+        options_.sweep_interval <= std::chrono::milliseconds::zero() ||
+        options_.sweep_interval > options_.heartbeat_timeout) {
+        return Error::invalidArgument(
+            "CommHubServer requires listener, endpoint and valid heartbeat timing");
     }
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -102,6 +109,7 @@ Result<void> CommHubServer::start() {
             return Error::invalidArgument("CommHubServer is already started");
         }
         started_ = true;
+        maintenance_stop_ = false;
     }
     const auto listening = listener_->listen(
         endpoint_, [this](std::shared_ptr<transport::IConnection> connection) {
@@ -112,41 +120,93 @@ Result<void> CommHubServer::start() {
         started_ = false;
         return transportError(listening.error());
     }
+    try {
+        maintenance_thread_ = std::thread([this]() noexcept {
+            try {
+                maintenanceLoop();
+            } catch (...) {
+                std::lock_guard<std::mutex> lock(mutex_);
+                maintenance_stop_ = true;
+            }
+        });
+    } catch (const std::exception& error) {
+        try {
+            listener_->close();
+        } catch (...) {
+            // Preserve the Result-based startup error path.
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        started_ = false;
+        maintenance_stop_ = true;
+        return Error::internal(std::string("failed to start CommHub maintenance: ") +
+                               error.what());
+    }
     return Result<void>::success();
 }
 
 void CommHubServer::stop() noexcept {
+    std::thread maintenance;
     std::vector<std::shared_ptr<Peer>> peers;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!started_) {
+        if (!started_ && !maintenance_thread_.joinable()) {
             return;
         }
         started_ = false;
-        peers.swap(peers_);
-        sessions_.clear();
+        maintenance_stop_ = true;
+        maintenance = std::move(maintenance_thread_);
+    }
+    maintenance_cv_.notify_all();
+    if (maintenance.joinable()) {
+        maintenance.join();
     }
     if (listener_) {
-        listener_->close();
+        try {
+            listener_->close();
+        } catch (...) {
+            // stop() is noexcept; continue cleaning up registered peers.
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lifecycle_lock(lifecycle_mutex_);
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            peers.swap(peers_);
+            sessions_.clear();
+        }
+        for (const auto& peer : peers) {
+            if (!peer->session_id.empty()) {
+                try {
+                    core_.disconnect(peer->session_id);
+                } catch (...) {
+                    // Continue draining all sessions during best-effort shutdown.
+                }
+            }
+        }
     }
     for (const auto& peer : peers) {
-        if (!peer->session_id.empty()) {
-            core_.disconnect(peer->session_id);
+        try {
+            peer->connection->close();
+        } catch (...) {
+            // One faulty transport peer must not abort server shutdown.
         }
-        peer->connection->close();
     }
 }
 
 void CommHubServer::accept(std::shared_ptr<transport::IConnection> connection) {
     auto peer = std::make_shared<Peer>();
     peer->connection = std::move(connection);
+    bool accepted = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!started_) {
-            peer->connection->close();
-            return;
+        if (started_) {
+            peers_.push_back(peer);
+            accepted = true;
         }
-        peers_.push_back(peer);
+    }
+    if (!accepted) {
+        peer->connection->close();
+        return;
     }
     std::weak_ptr<Peer> weak = peer;
     peer->connection->setReceiveHandler(
@@ -174,6 +234,16 @@ void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
     }
     if (wire.topic() == "system.subscription.update") {
         const auto status = updateSubscription(peer, frame);
+        if (!status) {
+            sendRouteError(peer, frame,
+                           {commhub::HubErrorCode::invalid_argument,
+                            status.error().message});
+        }
+        return;
+    }
+    if (wire.topic() == "system.heartbeat" ||
+        wire.message_type() == envelope::HEARTBEAT) {
+        const auto status = handleHeartbeat(peer, frame);
         if (!status) {
             sendRouteError(peer, frame,
                            {commhub::HubErrorCode::invalid_argument,
@@ -219,6 +289,7 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
         return Error::make(ErrorCategory::PermissionDenied,
                            "invalid CommHub authentication token");
     }
+    std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
     if (!peer->session_id.empty()) {
         return Error::protocol("connection is already registered");
     }
@@ -249,10 +320,20 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
     }
 
     peer->session_id = session.id;
+    bool installed = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        sessions_[session.id] = peer;
+        if (started_) {
+            sessions_[session.id] = peer;
+            installed = true;
+        }
     }
+    if (!installed) {
+        peer->session_id.clear();
+        core_.disconnect(session.id);
+        return Error::connectionLost("CommHub stopped during registration");
+    }
+    lifecycle_lock.unlock();
 
     system_proto::ServiceRegistrationAck ack;
     ack.set_hub_instance_id(hub_instance_id_);
@@ -283,6 +364,92 @@ Result<void> CommHubServer::updateSubscription(const std::shared_ptr<Peer>& peer
     }
     core_.unsubscribe(peer->session_id, update.topic());
     return Result<void>::success();
+}
+
+Result<void> CommHubServer::handleHeartbeat(
+    const std::shared_ptr<Peer>& peer,
+    const transport::ByteBuffer& frame) {
+    if (peer->session_id.empty()) {
+        return Error::protocol("heartbeat requires a registered session");
+    }
+    envelope::MessageEnvelope wire;
+    system_proto::Heartbeat heartbeat;
+    if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size())) ||
+        wire.topic() != "system.heartbeat" ||
+        wire.message_type() != envelope::HEARTBEAT ||
+        wire.payload_role() != envelope::SYSTEM_PAYLOAD ||
+        wire.payload_type() != "industrial_bus.system.v1.Heartbeat" ||
+        !heartbeat.ParseFromString(wire.payload()) || heartbeat.sequence() == 0) {
+        return Error::protocol("invalid Heartbeat");
+    }
+    auto route = decodeRouteMessage(frame);
+    if (!route) {
+        return route.error();
+    }
+    const auto received_at_unix_ns = unixNowNs();
+    const auto decision = core_.dispatch(peer->session_id, route.value(),
+                                         std::chrono::steady_clock::now(),
+                                         received_at_unix_ns);
+    if (!decision) {
+        return Error::protocol(decision.status.error.message);
+    }
+
+    system_proto::HeartbeatAck ack;
+    ack.set_sent_at_unix_ns(heartbeat.sent_at_unix_ns());
+    ack.set_received_at_unix_ns(received_at_unix_ns);
+    ack.set_sequence(heartbeat.sequence());
+    ack.set_hub_instance_id(hub_instance_id_);
+    const auto reply = serializeReply(
+        wire, "industrial_bus.system.v1.HeartbeatAck",
+        envelope::SYSTEM_PAYLOAD, ack, "commhub", hub_instance_id_);
+    const auto sent = peer->connection->send(transport::ByteView(reply));
+    return sent ? Result<void>::success()
+                : Result<void>::failure(transportError(sent.error()));
+}
+
+void CommHubServer::maintenanceLoop() {
+    std::unique_lock<std::mutex> lock(mutex_);
+    while (!maintenance_stop_) {
+        if (maintenance_cv_.wait_for(
+                lock, options_.sweep_interval,
+                [this] { return maintenance_stop_; })) {
+            return;
+        }
+        lock.unlock();
+        expireStaleSessions();
+        lock.lock();
+    }
+}
+
+void CommHubServer::expireStaleSessions() {
+    std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    const auto expired = core_.expireSessions(options_.heartbeat_timeout);
+    if (expired.empty()) {
+        return;
+    }
+    std::vector<std::shared_ptr<Peer>> peers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (const auto& session_id : expired) {
+            const auto found = sessions_.find(session_id);
+            if (found == sessions_.end()) {
+                continue;
+            }
+            const auto peer = found->second;
+            sessions_.erase(found);
+            peers_.erase(std::remove(peers_.begin(), peers_.end(), peer),
+                         peers_.end());
+            peers.push_back(peer);
+        }
+    }
+    lifecycle_lock.unlock();
+    for (const auto& peer : peers) {
+        try {
+            peer->connection->close();
+        } catch (...) {
+            // Keep the maintenance worker alive for the remaining sessions.
+        }
+    }
 }
 
 void CommHubServer::drain(const std::vector<commhub::SessionId>& targets) {

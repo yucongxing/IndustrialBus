@@ -1077,6 +1077,32 @@ Linux 本机：ipc://$XDG_RUNTIME_DIR/industrial-bus/commhub.sock
 - 订阅集合；
 - 发送队列状态。
 
+心跳使用应用层租约，不能以 ZeroMQ socket 的 connected 状态代替 Hub
+活性判断。客户端默认每 2 秒发送一次 Heartbeat，6 秒未收到有效
+HeartbeatAck 或其他有效入站消息则进入 Disconnected；Hub 默认以 6 秒
+租约、500 ms 扫描周期摘除过期 Session。所有超时判断使用单调时钟，Unix
+时间戳只用于诊断。
+
+```protobuf
+message Heartbeat {
+  int64 sent_at_unix_ns = 1;
+  uint64 sequence = 2;
+}
+
+message HeartbeatAck {
+  int64 sent_at_unix_ns = 1;
+  int64 received_at_unix_ns = 2;
+  uint64 sequence = 3;
+  string hub_instance_id = 4;
+}
+```
+
+Heartbeat 固定使用 `(system.heartbeat, HEARTBEAT, SYSTEM_PAYLOAD)`；Ack
+使用 `REPLY + SYSTEM_PAYLOAD`，并通过 `causation_id` 指向 Heartbeat。
+客户端必须同时校验 causation、sequence 和已发现的 Hub instance ID。
+租约到期后，Hub 原子摘除 Session，并清理对应 Service、ReturnRoute、QoS
+队列和 Peer 映射。断线检测不会自动重放 Command 或 Request。
+
 ### 19.2 ServiceRegistry
 
 服务注册信息：
