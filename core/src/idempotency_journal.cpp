@@ -758,6 +758,51 @@ Result<IdempotencyRecord> IdempotencyJournal::updateState(
     return existing->second;
 }
 
+Result<bool> IdempotencyJournal::claimForExecution(
+    const CommandIdentity& identity,
+    const std::string& operation_id) {
+    if (identity.source_service.empty() || identity.command_topic.empty() ||
+        identity.idempotency_key.empty() || operation_id.empty()) {
+        return Error::invalidArgument("invalid Command execution claim");
+    }
+    const auto now = unixNowNs();
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    const auto existing = impl_->records.find(identity);
+    if (existing == impl_->records.end() || existing->second.expires_at_unix_ns <= now) {
+        return Error::serviceUnavailable("idempotency record was not found");
+    }
+    if (existing->second.operation_id != operation_id) {
+        return Error::idempotencyConflict(
+            "operation id does not own this idempotency record");
+    }
+    if (existing->second.state != OperationState::Created) {
+        return false;
+    }
+
+    StateUpdateRecord update;
+    update.identity = identity;
+    update.operation_id = operation_id;
+    update.state = OperationState::Running;
+    update.updated_at_unix_ns =
+        std::max(now, existing->second.updated_at_unix_ns);
+    const auto serialized = serializeStateUpdate(update);
+    const auto original_end = impl_->file_end;
+    auto written = pwriteExact(impl_->fd, serialized, original_end);
+    if (!written || ::fdatasync(impl_->fd) != 0) {
+        const Error write_error = !written
+                                      ? written.error()
+                                      : ioError("failed to sync Command execution claim");
+        (void)::ftruncate(impl_->fd, original_end);
+        (void)::fdatasync(impl_->fd);
+        return write_error;
+    }
+    impl_->file_end += static_cast<off_t>(serialized.size());
+    existing->second.state = OperationState::Running;
+    existing->second.updated_at_unix_ns = update.updated_at_unix_ns;
+    existing->second.error.reset();
+    return true;
+}
+
 Result<IdempotencyRecord> IdempotencyJournal::find(
     const CommandIdentity& identity) const {
     std::lock_guard<std::mutex> lock(impl_->mutex);

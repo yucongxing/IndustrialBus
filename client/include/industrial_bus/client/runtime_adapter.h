@@ -84,6 +84,7 @@ public:
     virtual ConnectionState state() const = 0;
     virtual std::uint64_t generation() const = 0;
     virtual ServiceSnapshot services() const = 0;
+    virtual ServiceInfo localService() const { return {}; }
     virtual bool flush(std::chrono::milliseconds timeout) = 0;
     virtual void close() noexcept = 0;
 };

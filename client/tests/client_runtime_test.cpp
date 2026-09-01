@@ -1,6 +1,9 @@
 #include "industrial_bus/bus_client.h"
 #include "industrial_bus/client/pending_request_table.h"
 #include "industrial_bus/client/runtime_adapter.h"
+#include "industrial_bus/core/idempotency_journal.h"
+
+#include "system.pb.h"
 
 #include <cassert>
 #include <chrono>
@@ -10,6 +13,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -56,6 +60,9 @@ public:
     ConnectionState state() const override { return current_state; }
     std::uint64_t generation() const override { return current_generation; }
     ServiceSnapshot services() const override { return {{"worker", "instance-1", true}}; }
+    ServiceInfo localService() const override {
+        return {"test-client", "test-instance", true};
+    }
     bool flush(std::chrono::milliseconds) override { return true; }
     void close() noexcept override { current_state = ConnectionState::Disconnected; }
 
@@ -110,10 +117,23 @@ void testPendingTableTimeoutAndLateReply() {
 }
 
 void testClientLifecycle() {
+    char directory_template[] = "/tmp/industrial-bus-client-journal-XXXXXX";
+    char* journal_directory = ::mkdtemp(directory_template);
+    assert(journal_directory != nullptr);
+    const std::string journal_path =
+        std::string(journal_directory) + "/commands.journal";
+    core::IdempotencyJournalOptions journal_options;
+    journal_options.path = journal_path;
+    auto opened_journal = core::IdempotencyJournal::open(journal_options);
+    assert(opened_journal);
+
     auto adapter = std::make_shared<FakeAdapter>();
     ClientOptions options;
     options.service_name = "test-client";
     options.runtime_adapter = adapter;
+    auto journal =
+        std::shared_ptr<core::IdempotencyJournal>(std::move(opened_journal.value()));
+    options.idempotency_journal = journal;
     auto connected = BusClient::connect(options);
     assert(connected);
     auto bus = connected.value();
@@ -179,8 +199,9 @@ void testClientLifecycle() {
     assert(!restart_result);
     assert(restart_result.error().category == ErrorCategory::HubRestarted);
 
-    const CommandTopic<std::string, std::string> command_topic{
-        "test.command", "test.StringCommand", "test.StringAck"};
+    const CommandTopic<std::string, system::v1::CommandAck> command_topic{
+        "test.command", "test.StringCommand",
+        "industrial_bus.system.v1.CommandAck"};
     auto invalid_command = bus->command(Destination{"worker", {}}, command_topic,
                                         std::string("run"));
     assert(invalid_command.get().error().category == ErrorCategory::InvalidArgument);
@@ -193,11 +214,15 @@ void testClientLifecycle() {
     client::InboundMessage ack;
     ack.kind = client::MessageKind::Reply;
     ack.causation_id = command.message_id;
-    ack.payload_type = "test.StringAck";
-    PayloadCodec<std::string>::encode("accepted", ack.payload);
+    ack.payload_type = "industrial_bus.system.v1.CommandAck";
+    system::v1::CommandAck wire_ack;
+    wire_ack.set_operation_id("outgoing-operation");
+    wire_ack.set_owner_service("worker");
+    wire_ack.set_owner_instance("instance-1");
+    PayloadCodec<system::v1::CommandAck>::encode(wire_ack, ack.payload);
     adapter->deliver(std::move(ack));
     auto accepted = command_future.get();
-    assert(accepted && accepted.value() == "accepted");
+    assert(accepted && accepted.value().operation_id() == "outgoing-operation");
 
     bool request_handler_called = false;
     auto request_handler = bus->handleRequest(
@@ -245,11 +270,18 @@ void testClientLifecycle() {
     assert(PayloadCodec<std::string>::decode(response_reply.payload, response_value));
     assert(response_value == "incoming answer");
 
+    int command_handler_calls = 0;
     auto command_handler = bus->handleCommand(
         command_topic,
-        [](const std::string&, const MessageContext& context) -> Result<std::string> {
+        [&](const std::string& value, const MessageContext& context) -> Result<void> {
+            ++command_handler_calls;
+            assert(!context.operation_id.empty());
+            if (value == "fail") {
+                assert(context.idempotency_key == "incoming-intent-failed");
+                return Error::internal("cannot enqueue command");
+            }
             assert(context.idempotency_key == "incoming-intent-1");
-            return Error::idempotencyConflict("intent already has another payload");
+            return {};
         },
         executor);
     assert(command_handler);
@@ -265,11 +297,86 @@ void testClientLifecycle() {
     PayloadCodec<std::string>::encode("run", incoming_command.payload);
     adapter->deliver(incoming_command);
     executor->runAll();
-    const auto error_reply = adapter->lastSent();
-    assert(error_reply.payload_role == client::PayloadRole::ErrorDetail);
-    assert(error_reply.causation_id == "incoming-command-1");
-    assert(error_reply.error);
-    assert(error_reply.error->category == ErrorCategory::IdempotencyConflict);
+    assert(command_handler_calls == 1);
+    const auto accepted_reply = adapter->lastSent();
+    assert(accepted_reply.payload_role == client::PayloadRole::CommandAck);
+    assert(accepted_reply.causation_id == "incoming-command-1");
+    assert(accepted_reply.payload_type == "industrial_bus.system.v1.CommandAck");
+    system::v1::CommandAck accepted_ack;
+    assert(PayloadCodec<system::v1::CommandAck>::decode(accepted_reply.payload,
+                                                        accepted_ack));
+    assert(!accepted_ack.operation_id().empty());
+    assert(accepted_ack.owner_service() == "test-client");
+    assert(accepted_ack.owner_instance() == "test-instance");
+    assert(!accepted_ack.duplicate());
+    assert(accepted_ack.current_state() == operation::v1::RUNNING);
+
+    incoming_command.message_id = "incoming-command-duplicate";
+    adapter->deliver(incoming_command);
+    executor->runAll();
+    assert(command_handler_calls == 1);
+    const auto duplicate_reply = adapter->lastSent();
+    system::v1::CommandAck duplicate_ack;
+    assert(PayloadCodec<system::v1::CommandAck>::decode(duplicate_reply.payload,
+                                                        duplicate_ack));
+    assert(duplicate_ack.duplicate());
+    assert(duplicate_ack.operation_id() == accepted_ack.operation_id());
+
+    incoming_command.message_id = "incoming-command-conflict";
+    PayloadCodec<std::string>::encode("different", incoming_command.payload);
+    adapter->deliver(incoming_command);
+    executor->runAll();
+    assert(command_handler_calls == 1);
+    const auto conflict_reply = adapter->lastSent();
+    assert(conflict_reply.error);
+    assert(conflict_reply.error->category == ErrorCategory::IdempotencyConflict);
+
+    incoming_command.message_id = "incoming-command-failed";
+    incoming_command.idempotency_key = "incoming-intent-failed";
+    PayloadCodec<std::string>::encode("fail", incoming_command.payload);
+    adapter->deliver(incoming_command);
+    executor->runAll();
+    assert(command_handler_calls == 2);
+    const auto failed_reply = adapter->lastSent();
+    assert(failed_reply.error);
+    assert(failed_reply.error->category == ErrorCategory::InternalError);
+    incoming_command.message_id = "incoming-command-failed-retry";
+    adapter->deliver(incoming_command);
+    executor->runAll();
+    assert(command_handler_calls == 2);
+    const auto failed_retry_reply = adapter->lastSent();
+    assert(failed_retry_reply.error);
+    assert(failed_retry_reply.error->category == ErrorCategory::InternalError);
+
+    const CommandTopic<system::v1::CommandAck, system::v1::CommandAck>
+        protobuf_command_topic{"test.protobuf-command",
+                               "industrial_bus.system.v1.CommandAck",
+                               "industrial_bus.system.v1.CommandAck"};
+    int malformed_handler_calls = 0;
+    auto protobuf_command_handler = bus->handleCommand(
+        protobuf_command_topic,
+        [&](const system::v1::CommandAck&, const MessageContext&) -> Result<void> {
+            ++malformed_handler_calls;
+            return {};
+        },
+        executor);
+    assert(protobuf_command_handler);
+    const auto records_before_malformed = journal->liveRecordCount();
+    client::InboundMessage malformed_command;
+    malformed_command.kind = client::MessageKind::Command;
+    malformed_command.message_id = "malformed-command";
+    malformed_command.source_service = "caller";
+    malformed_command.source_instance = "caller-1";
+    malformed_command.topic = "test.protobuf-command";
+    malformed_command.payload_type = "industrial_bus.system.v1.CommandAck";
+    malformed_command.idempotency_key = "malformed-intent";
+    malformed_command.payload = {0xffU};
+    adapter->deliver(std::move(malformed_command));
+    assert(malformed_handler_calls == 0);
+    assert(journal->liveRecordCount() == records_before_malformed);
+    const auto malformed_reply = adapter->lastSent();
+    assert(malformed_reply.error);
+    assert(malformed_reply.error->category == ErrorCategory::ProtocolError);
 
     const auto before_cancelled_delivery = adapter->sentCount();
     adapter->deliver(incoming_request);
@@ -281,6 +388,8 @@ void testClientLifecycle() {
     assert(bus->shutdown(std::chrono::milliseconds(10)));
     assert(bus->connectionState() == ConnectionState::Disconnected);
     assert(bus->shutdown(std::chrono::milliseconds(10)));
+    assert(::unlink(journal_path.c_str()) == 0);
+    assert(::rmdir(journal_directory) == 0);
 }
 
 }  // namespace

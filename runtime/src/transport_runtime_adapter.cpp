@@ -164,6 +164,10 @@ ServiceSnapshot TransportRuntimeAdapter::services() const {
     return {{options_.service_name, options_.instance_id, true}};
 }
 
+ServiceInfo TransportRuntimeAdapter::localService() const {
+    return {options_.service_name, options_.instance_id, true};
+}
+
 bool TransportRuntimeAdapter::flush(std::chrono::milliseconds) {
     return true;
 }

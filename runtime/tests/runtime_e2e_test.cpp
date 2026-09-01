@@ -1,3 +1,5 @@
+#include "industrial_bus/bus_client.h"
+#include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
 #include "industrial_bus/runtime/commhub_server.h"
 #include "industrial_bus/runtime/envelope_codec.h"
@@ -5,12 +7,14 @@
 #include "loopback_transport.h"
 
 #include <cassert>
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
@@ -64,6 +68,16 @@ void testErrorEnvelopeRoundTrip() {
 }  // namespace
 
 int main() {
+    char journal_directory_template[] = "/tmp/industrial-bus-e2e-journal-XXXXXX";
+    char* journal_directory = ::mkdtemp(journal_directory_template);
+    assert(journal_directory != nullptr);
+    const std::string journal_path =
+        std::string(journal_directory) + "/commands.journal";
+    core::IdempotencyJournalOptions journal_options;
+    journal_options.path = journal_path;
+    auto opened_journal = core::IdempotencyJournal::open(journal_options);
+    assert(opened_journal);
+
     testErrorEnvelopeRoundTrip();
     auto loopback = std::make_shared<transport::LoopbackHub>();
     const transport::Endpoint endpoint{"loopback://runtime-e2e"};
@@ -100,6 +114,8 @@ int main() {
     std::condition_variable changed;
     std::string caller_event;
     std::string command_ack;
+    bool duplicate_ack = false;
+    int ack_count = 0;
     Error route_error;
 
     caller->setReceiveHandler([&](client::InboundMessage message) {
@@ -107,33 +123,38 @@ int main() {
         if (message.has_error) {
             route_error = std::move(message.error);
         } else if (message.payload_role == client::PayloadRole::CommandAck) {
-            command_ack.assign(message.payload.begin(), message.payload.end());
+            system::v1::CommandAck ack;
+            assert(PayloadCodec<system::v1::CommandAck>::decode(message.payload, ack));
+            command_ack = ack.operation_id();
+            duplicate_ack = ack.duplicate();
+            ++ack_count;
         } else {
             caller_event.assign(message.payload.begin(), message.payload.end());
         }
         changed.notify_all();
     });
 
-    worker->setReceiveHandler([&](client::InboundMessage message) {
-        if (message.kind != client::MessageKind::Command) {
-            return;
-        }
-        client::OutboundMessage reply;
-        reply.kind = client::MessageKind::Reply;
-        reply.payload_role = client::PayloadRole::CommandAck;
-        reply.message_id = generateUuidV4();
-        reply.correlation_id = message.correlation_id;
-        reply.causation_id = message.message_id;
-        reply.operation_id = message.operation_id;
-        reply.topic = message.topic;
-        reply.payload_type = "test.StringAck";
-        const std::string accepted = "accepted";
-        reply.payload.assign(accepted.begin(), accepted.end());
-        assert(worker->send(std::move(reply)));
-    });
-
     assert(caller->start());
-    assert(worker->start());
+    ClientOptions worker_client_options;
+    worker_client_options.service_name = "worker";
+    worker_client_options.runtime_adapter = worker;
+    worker_client_options.idempotency_journal =
+        std::shared_ptr<core::IdempotencyJournal>(std::move(opened_journal.value()));
+    auto connected_worker = BusClient::connect(worker_client_options);
+    assert(connected_worker);
+    auto worker_bus = connected_worker.value();
+    const CommandTopic<std::string, system::v1::CommandAck> command_topic{
+        "test.command", "test.StringCommand",
+        "industrial_bus.system.v1.CommandAck"};
+    std::atomic<int> command_executions{0};
+    auto command_handler = worker_bus->handleCommand(
+        command_topic,
+        [&](const std::string& value, const MessageContext&) -> Result<void> {
+            assert(value == "execute");
+            ++command_executions;
+            return {};
+        });
+    assert(command_handler);
 
     assert(caller->subscribe("test.event"));
     assert(worker->send(eventMessage("test.event", "broadcast")));
@@ -149,20 +170,44 @@ int main() {
     command.payload_role = client::PayloadRole::CommandData;
     command.message_id = generateUuidV4();
     command.correlation_id = generateUuidV4();
-    command.operation_id = generateUuidV4();
+    const auto command_operation_id = generateUuidV4();
+    command.operation_id = command_operation_id;
     command.destination = {"worker", {}};
     command.topic = "test.command";
     command.payload_type = "test.StringCommand";
     command.idempotency_key = "runtime-e2e-command";
     command.deadline_unix_ns = deadlineAfter(std::chrono::seconds(2));
-    command.payload = {1, 2, 3};
+    PayloadCodec<std::string>::encode("execute", command.payload);
     assert(caller->send(std::move(command)));
     {
         std::unique_lock<std::mutex> lock(mutex);
         assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
-            return command_ack == "accepted";
+            return command_ack == command_operation_id && ack_count == 1;
         }));
     }
+    assert(command_executions == 1);
+    assert(!duplicate_ack);
+
+    client::OutboundMessage duplicate_command;
+    duplicate_command.kind = client::MessageKind::Command;
+    duplicate_command.payload_role = client::PayloadRole::CommandData;
+    duplicate_command.message_id = generateUuidV4();
+    duplicate_command.correlation_id = generateUuidV4();
+    duplicate_command.operation_id = command_operation_id;
+    duplicate_command.destination = {"worker", {}};
+    duplicate_command.topic = "test.command";
+    duplicate_command.payload_type = "test.StringCommand";
+    duplicate_command.idempotency_key = "runtime-e2e-command";
+    duplicate_command.deadline_unix_ns = deadlineAfter(std::chrono::seconds(2));
+    PayloadCodec<std::string>::encode("execute", duplicate_command.payload);
+    assert(caller->send(std::move(duplicate_command)));
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        assert(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+            return ack_count == 2 && duplicate_ack;
+        }));
+    }
+    assert(command_executions == 1);
 
     client::OutboundMessage missing;
     missing.kind = client::MessageKind::Command;
@@ -182,8 +227,10 @@ int main() {
         }));
     }
 
-    worker->close();
+    assert(worker_bus->shutdown(std::chrono::milliseconds(20)));
     caller->close();
     hub.stop();
+    assert(::unlink(journal_path.c_str()) == 0);
+    assert(::rmdir(journal_directory) == 0);
     return 0;
 }

@@ -4,6 +4,7 @@
 #include "industrial_bus/operation_state.h"
 #include "industrial_bus/result.h"
 
+#include <atomic>
 #include <cstdlib>
 #include <fcntl.h>
 #include <iostream>
@@ -11,7 +12,9 @@
 #include <stdexcept>
 #include <string>
 #include <sys/stat.h>
+#include <thread>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -251,6 +254,26 @@ void testIdempotencyJournal() {
     second.owner_service = "layout-boolean";
     second.owner_instance = "worker-1";
     CHECK(journal->registerCommand(second));
+
+    std::atomic<int> execution_claims{0};
+    std::atomic<int> claim_errors{0};
+    std::vector<std::thread> claimers;
+    for (int i = 0; i < 8; ++i) {
+        claimers.emplace_back([&] {
+            auto claimed = journal->claimForExecution(second.identity,
+                                                      second.operation_id);
+            if (!claimed) {
+                ++claim_errors;
+            } else if (claimed.value()) {
+                ++execution_claims;
+            }
+        });
+    }
+    for (auto& claimer : claimers) {
+        claimer.join();
+    }
+    CHECK(claim_errors == 0);
+    CHECK(execution_claims == 1);
 
     auto third = second;
     third.identity.idempotency_key = "intent-3";

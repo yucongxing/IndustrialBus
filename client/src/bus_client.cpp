@@ -3,7 +3,10 @@
 #include "industrial_bus/client/default_executor.h"
 #include "industrial_bus/client/pending_request_table.h"
 #include "industrial_bus/client/runtime_adapter.h"
+#include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
+
+#include "system.pb.h"
 
 #include <atomic>
 #include <chrono>
@@ -25,6 +28,12 @@ std::int64_t unixDeadline(Duration timeout) {
     const auto deadline = std::chrono::system_clock::now() + timeout;
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                deadline.time_since_epoch())
+        .count();
+}
+
+std::int64_t unixNowNs() {
+    return std::chrono::duration_cast<std::chrono::nanoseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
         .count();
 }
 
@@ -161,6 +170,7 @@ private:
 
 using ServiceHandler =
     std::function<Result<ByteBuffer>(const ByteBuffer&, const MessageContext&)>;
+using PayloadValidator = std::function<Result<void>(const ByteBuffer&)>;
 
 struct ServiceHandlerEntry {
     std::mutex mutex;
@@ -168,6 +178,7 @@ struct ServiceHandlerEntry {
     bool command_handler{false};
     std::string input_type;
     std::string output_type;
+    PayloadValidator validator;
     ServiceHandler handler;
     std::shared_ptr<IExecutor> executor;
 };
@@ -175,16 +186,22 @@ struct ServiceHandlerEntry {
 class ServiceHandlerRegistry
     : public std::enable_shared_from_this<ServiceHandlerRegistry> {
 public:
+    ServiceHandlerRegistry(std::shared_ptr<core::IdempotencyJournal> journal,
+                           ServiceInfo local_service)
+        : journal_(std::move(journal)), local_service_(std::move(local_service)) {}
+
     Subscription add(bool command_handler,
                      std::string topic,
                      std::string input_type,
                      std::string output_type,
+                     PayloadValidator validator,
                      ServiceHandler handler,
                      std::shared_ptr<IExecutor> executor) {
         auto entry = std::make_shared<ServiceHandlerEntry>();
         entry->command_handler = command_handler;
         entry->input_type = std::move(input_type);
         entry->output_type = std::move(output_type);
+        entry->validator = std::move(validator);
         entry->handler = std::move(handler);
         entry->executor = std::move(executor);
 
@@ -192,7 +209,10 @@ public:
         std::uint64_t id;
         {
             std::lock_guard<std::mutex> lock(mutex_);
-            if (stopping_ || entries_.count(key) != 0) {
+            if (stopping_ || entries_.count(key) != 0 ||
+                (command_handler &&
+                 (!journal_ || local_service_.service_name.empty() ||
+                  local_service_.instance_id.empty()))) {
                 return {};
             }
             id = next_id_++;
@@ -232,8 +252,24 @@ public:
                                       message.topic + "'"));
             return;
         }
+        if (entry->command_handler && entry->validator) {
+            Result<void> validated = Error::protocol("payload validator did not complete");
+            try {
+                validated = entry->validator(message.payload);
+            } catch (const std::exception& error) {
+                validated = Error::protocol(std::string("payload validator threw: ") +
+                                            error.what());
+            } catch (...) {
+                validated = Error::protocol("payload validator threw an unknown exception");
+            }
+            if (!validated) {
+                sendError(message, adapter, validated.error());
+                return;
+            }
+        }
 
-        entry->executor->post([entry, message, adapter] {
+        auto self = shared_from_this();
+        entry->executor->post([self, entry, message, adapter] {
             ServiceHandler handler;
             std::string output_type;
             {
@@ -254,6 +290,12 @@ public:
             context.idempotency_key = message.idempotency_key;
             context.deadline_unix_ns = message.deadline_unix_ns;
 
+            if (entry->command_handler) {
+                self->executeCommand(message, std::move(context),
+                                     std::move(handler), adapter);
+                return;
+            }
+
             Result<ByteBuffer> result = Error::internal("handler did not complete");
             try {
                 result = handler(message.payload, context);
@@ -266,9 +308,7 @@ public:
 
             client::OutboundMessage reply = makeReply(message);
             if (result) {
-                reply.payload_role = entry->command_handler
-                                         ? client::PayloadRole::CommandAck
-                                         : client::PayloadRole::ResponseData;
+                reply.payload_role = client::PayloadRole::ResponseData;
                 reply.payload_type = std::move(output_type);
                 reply.payload = std::move(result.value());
             } else {
@@ -295,9 +335,11 @@ public:
         }
     }
 
-    static std::shared_ptr<ServiceHandlerRegistry> create() {
-        struct SharedRegistry final : ServiceHandlerRegistry {};
-        return std::make_shared<SharedRegistry>();
+    static std::shared_ptr<ServiceHandlerRegistry> create(
+        std::shared_ptr<core::IdempotencyJournal> journal,
+        ServiceInfo local_service) {
+        return std::make_shared<ServiceHandlerRegistry>(std::move(journal),
+                                                        std::move(local_service));
     }
 
 private:
@@ -326,10 +368,150 @@ private:
                           const std::shared_ptr<client::IRuntimeAdapter>& adapter,
                           Error error) {
         auto reply = makeReply(message);
+        if (!error.operation_id.empty()) {
+            reply.operation_id = error.operation_id;
+        }
         reply.payload_role = client::PayloadRole::ErrorDetail;
         reply.payload_type = "industrial_bus.system.v1.Error";
         reply.error = std::make_shared<Error>(std::move(error));
         (void)adapter->send(std::move(reply));
+    }
+
+    static Result<ByteBuffer> encodeCommandAck(const core::IdempotencyRecord& record,
+                                               bool duplicate) {
+        system::v1::CommandAck ack;
+        ack.set_operation_id(record.operation_id);
+        ack.set_owner_service(record.owner_service);
+        ack.set_owner_instance(record.owner_instance);
+        ack.set_duplicate(duplicate);
+        ack.set_current_state(
+            static_cast<operation::v1::OperationState>(record.state));
+        ByteBuffer payload;
+        if (!PayloadCodec<system::v1::CommandAck>::encode(ack, payload)) {
+            return Error::protocol("failed to serialize standard CommandAck");
+        }
+        return payload;
+    }
+
+    void sendCommandAck(const client::InboundMessage& message,
+                        const core::IdempotencyRecord& record,
+                        bool duplicate,
+                        const std::shared_ptr<client::IRuntimeAdapter>& adapter) {
+        auto encoded = encodeCommandAck(record, duplicate);
+        if (!encoded) {
+            sendError(message, adapter, encoded.error());
+            return;
+        }
+        auto reply = makeReply(message);
+        reply.operation_id = record.operation_id;
+        reply.payload_role = client::PayloadRole::CommandAck;
+        reply.payload_type = "industrial_bus.system.v1.CommandAck";
+        reply.payload = std::move(encoded.value());
+        (void)adapter->send(std::move(reply));
+    }
+
+    void executeCommand(const client::InboundMessage& message,
+                        MessageContext context,
+                        ServiceHandler handler,
+                        const std::shared_ptr<client::IRuntimeAdapter>& adapter) {
+        if (!journal_) {
+            sendError(message, adapter,
+                      Error::serviceUnavailable(
+                          "Command handler requires a durable idempotency journal"));
+            return;
+        }
+        if (local_service_.service_name.empty() || local_service_.instance_id.empty()) {
+            sendError(message, adapter,
+                      Error::internal("runtime adapter did not expose its local identity"));
+            return;
+        }
+        if (message.source_service.empty() || message.idempotency_key.empty()) {
+            sendError(message, adapter,
+                      Error::protocol(
+                          "Command requires source_service and idempotency_key"));
+            return;
+        }
+        if (message.deadline_unix_ns != 0 && message.deadline_unix_ns <= unixNowNs()) {
+            sendError(message, adapter,
+                      Error::timeout("Command deadline elapsed before acceptance"));
+            return;
+        }
+
+        core::CommandRegistration registration;
+        registration.identity = {message.source_service, message.topic,
+                                 message.idempotency_key};
+        registration.payload = message.payload;
+        registration.operation_id = message.operation_id.empty() ? generateUuidV4()
+                                                                  : message.operation_id;
+        registration.owner_service = local_service_.service_name;
+        registration.owner_instance = local_service_.instance_id;
+        auto decision_result = journal_->registerCommand(std::move(registration));
+        if (!decision_result) {
+            sendError(message, adapter, decision_result.error());
+            return;
+        }
+        auto decision = std::move(decision_result.value());
+        auto& record = decision.record;
+        context.operation_id = record.operation_id;
+
+        if (decision.duplicate && record.state == OperationState::Failed &&
+            record.error) {
+            sendError(message, adapter, *record.error);
+            return;
+        }
+        if (decision.duplicate && !isTerminal(record.state) &&
+            (record.owner_service != local_service_.service_name ||
+             record.owner_instance != local_service_.instance_id)) {
+            auto error = Error::ownerUnavailable(
+                "Command operation belongs to an unavailable service instance");
+            error.operation_id = record.operation_id;
+            sendError(message, adapter, std::move(error));
+            return;
+        }
+        if (decision.duplicate && record.state != OperationState::Created) {
+            sendCommandAck(message, record, true, adapter);
+            return;
+        }
+
+        auto claimed = journal_->claimForExecution(record.identity,
+                                                   record.operation_id);
+        if (!claimed) {
+            sendError(message, adapter, claimed.error());
+            return;
+        }
+        if (!claimed.value()) {
+            auto current = journal_->find(record.identity);
+            if (!current) {
+                sendError(message, adapter, current.error());
+                return;
+            }
+            sendCommandAck(message, current.value(), decision.duplicate, adapter);
+            return;
+        }
+        record.state = OperationState::Running;
+
+        Result<ByteBuffer> handled = Error::internal("Command handler did not complete");
+        try {
+            handled = handler(message.payload, context);
+        } catch (const std::exception& error) {
+            handled = Error::internal(std::string("Command handler threw: ") +
+                                      error.what());
+        } catch (...) {
+            handled = Error::internal("Command handler threw an unknown exception");
+        }
+        if (!handled) {
+            auto error = handled.error();
+            error.operation_id = record.operation_id;
+            auto failed = journal_->updateState(record.identity, record.operation_id,
+                                                OperationState::Failed, error);
+            if (!failed) {
+                sendError(message, adapter, failed.error());
+                return;
+            }
+            sendError(message, adapter, std::move(error));
+            return;
+        }
+        sendCommandAck(message, record, decision.duplicate, adapter);
     }
 
     static void deactivate(const std::shared_ptr<ServiceHandlerEntry>& entry) noexcept {
@@ -355,6 +537,8 @@ private:
 
     std::mutex mutex_;
     std::unordered_map<std::string, StoredEntry> entries_;
+    std::shared_ptr<core::IdempotencyJournal> journal_;
+    ServiceInfo local_service_;
     std::uint64_t next_id_{1};
     bool stopping_{false};
 };
@@ -378,7 +562,9 @@ public:
           state(std::make_shared<CallbackState>()) {
         state->pending = std::make_shared<client::PendingRequestTable>();
         state->subscriptions = SubscriptionRegistry::create();
-        state->service_handlers = ServiceHandlerRegistry::create();
+        state->service_handlers = ServiceHandlerRegistry::create(
+            options.idempotency_journal,
+            adapter ? adapter->localService() : ServiceInfo{});
     }
 
     Result<void> start() {
@@ -519,10 +705,15 @@ Subscription BusClient::registerHandlerRaw(bool command_handler,
                                            std::string topic,
                                            std::string input_type,
                                            std::string output_type,
+                                           RawPayloadValidator validator,
                                            RawServiceHandler handler,
                                            std::shared_ptr<IExecutor> executor) {
     if (topic.empty() || input_type.empty() || output_type.empty() || !handler ||
         !impl_->state->accepting.load()) {
+        return {};
+    }
+    if (command_handler &&
+        output_type != "industrial_bus.system.v1.CommandAck") {
         return {};
     }
     if (!executor) {
@@ -530,7 +721,8 @@ Subscription BusClient::registerHandlerRaw(bool command_handler,
     }
     return impl_->state->service_handlers->add(
         command_handler, std::move(topic), std::move(input_type),
-        std::move(output_type), std::move(handler), std::move(executor));
+        std::move(output_type), std::move(validator), std::move(handler),
+        std::move(executor));
 }
 
 void BusClient::commandRaw(Destination destination,

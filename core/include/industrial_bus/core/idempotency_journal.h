@@ -64,6 +64,10 @@ public:
     IdempotencyJournal& operator=(const IdempotencyJournal&) = delete;
 
     Result<RegistrationDecision> registerCommand(CommandRegistration command);
+    // Atomically persists CREATED -> RUNNING. Exactly one concurrent caller can
+    // receive true for a registration; false means execution was already claimed.
+    Result<bool> claimForExecution(const CommandIdentity& identity,
+                                   const std::string& operation_id);
     Result<IdempotencyRecord> updateState(const CommandIdentity& identity,
                                           const std::string& operation_id,
                                           OperationState next,

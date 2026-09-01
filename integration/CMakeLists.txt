@@ -1,3 +1,7 @@
+if(NOT TARGET IndustrialBus::Client)
+    return()
+endif()
+
 add_library(industrial_bus_integration STATIC
     operation_guard/operation.cpp
     progress/progress_throttle.cpp

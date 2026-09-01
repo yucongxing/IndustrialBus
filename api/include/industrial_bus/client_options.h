@@ -10,6 +10,9 @@ namespace industrial_bus {
 namespace client {
 class IRuntimeAdapter;
 }
+namespace core {
+class IdempotencyJournal;
+}
 
 using Duration = std::chrono::milliseconds;
 
@@ -32,6 +35,8 @@ struct ClientOptions {
     std::size_t callback_threads{1};
     std::size_t outbound_capacity{1024};
     std::shared_ptr<client::IRuntimeAdapter> runtime_adapter;
+    // Required only when this process registers Command handlers.
+    std::shared_ptr<core::IdempotencyJournal> idempotency_journal;
 };
 
 struct ServiceInfo {

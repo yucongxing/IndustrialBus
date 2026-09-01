@@ -35,6 +35,7 @@ public:
     ConnectionState state() const override;
     std::uint64_t generation() const override;
     ServiceSnapshot services() const override;
+    ServiceInfo localService() const override;
     bool flush(std::chrono::milliseconds timeout) override;
     void close() noexcept override;
 

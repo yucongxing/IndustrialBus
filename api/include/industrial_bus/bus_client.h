@@ -10,6 +10,8 @@
 #include "industrial_bus/subscription.h"
 #include "industrial_bus/topic.h"
 
+#include "system.pb.h"
+
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -125,31 +127,37 @@ public:
         return future;
     }
 
-    template <typename Command, typename Ack, typename Handler>
-    Subscription handleCommand(CommandTopic<Command, Ack> topic,
-                               Handler&& handler,
-                               std::shared_ptr<IExecutor> executor = {}) {
+    // Handler returns Result<void> after accepting/enqueuing the operation. It is
+    // invoked only after the configured idempotency journal is durably updated.
+    template <typename Command, typename Handler>
+    Subscription handleCommand(
+        CommandTopic<Command, system::v1::CommandAck> topic,
+        Handler&& handler,
+        std::shared_ptr<IExecutor> executor = {}) {
         using HandlerType = typename std::decay<Handler>::type;
         auto shared_handler =
             std::make_shared<HandlerType>(std::forward<Handler>(handler));
         return registerHandlerRaw(
             true, std::string(topic.name), std::string(topic.command_type),
             std::string(topic.ack_type),
+            [](const ByteBuffer& bytes) -> Result<void> {
+                Command command_value;
+                if (!PayloadCodec<Command>::decode(bytes, command_value)) {
+                    return Error::protocol("failed to parse command payload");
+                }
+                return {};
+            },
             [shared_handler](const ByteBuffer& bytes,
                              const MessageContext& context) -> Result<ByteBuffer> {
                 Command command_value;
                 if (!PayloadCodec<Command>::decode(bytes, command_value)) {
                     return Error::protocol("failed to parse command payload");
                 }
-                Result<Ack> result = (*shared_handler)(command_value, context);
+                Result<void> result = (*shared_handler)(command_value, context);
                 if (!result) {
                     return result.error();
                 }
-                ByteBuffer response;
-                if (!PayloadCodec<Ack>::encode(result.value(), response)) {
-                    return Error::protocol("failed to serialize CommandAck payload");
-                }
-                return response;
+                return ByteBuffer{};
             },
             std::move(executor));
     }
@@ -164,6 +172,7 @@ public:
         return registerHandlerRaw(
             false, std::string(topic.name), std::string(topic.request_type),
             std::string(topic.response_type),
+            {},
             [shared_handler](const ByteBuffer& bytes,
                              const MessageContext& context) -> Result<ByteBuffer> {
                 Request request_value;
@@ -198,6 +207,7 @@ public:
 private:
     using RawCompletion = std::function<void(Result<ByteBuffer>)>;
     using RawEventHandler = std::function<void(const ByteBuffer&)>;
+    using RawPayloadValidator = std::function<Result<void>(const ByteBuffer&)>;
     using RawServiceHandler =
         std::function<Result<ByteBuffer>(const ByteBuffer&, const MessageContext&)>;
 
@@ -212,6 +222,7 @@ private:
                                     std::string topic,
                                     std::string input_type,
                                     std::string output_type,
+                                    RawPayloadValidator validator,
                                     RawServiceHandler handler,
                                     std::shared_ptr<IExecutor> executor);
     void commandRaw(Destination destination,
