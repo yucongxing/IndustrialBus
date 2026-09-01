@@ -8,6 +8,10 @@
 
 #include "system.pb.h"
 
+#if defined(INDUSTRIAL_BUS_HAS_LINUX_RUNTIME)
+#include "linux_runtime_adapter.h"
+#endif
+
 #include <atomic>
 #include <chrono>
 #include <cstdint>
@@ -659,6 +663,9 @@ public:
 
 Result<std::shared_ptr<BusClient>> BusClient::connect(const ClientOptions& options) {
     std::lock_guard<std::mutex> lock(g_client_mutex);
+    if (options.service_name.empty()) {
+        return Error::invalidArgument("ClientOptions.service_name is required");
+    }
     if (auto existing = g_process_client.lock()) {
         const auto state = existing->connectionState();
         if (state != ConnectionState::Disconnected &&
@@ -667,7 +674,17 @@ Result<std::shared_ptr<BusClient>> BusClient::connect(const ClientOptions& optio
         }
     }
 
-    auto impl = std::make_unique<Impl>(options);
+    ClientOptions resolved_options = options;
+    if (!resolved_options.runtime_adapter) {
+#if defined(INDUSTRIAL_BUS_HAS_LINUX_RUNTIME)
+        resolved_options.runtime_adapter =
+            client::makeLinuxRuntimeAdapter(resolved_options);
+#else
+        return Error::serviceUnavailable(
+            "this build has no default Linux runtime adapter");
+#endif
+    }
+    auto impl = std::make_unique<Impl>(resolved_options);
     auto result = impl->start();
     if (!result) {
         return result.error();

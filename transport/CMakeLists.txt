@@ -1,3 +1,11 @@
+add_library(industrial_bus_transport_spi INTERFACE)
+add_library(IndustrialBus::TransportSPI ALIAS industrial_bus_transport_spi)
+target_include_directories(industrial_bus_transport_spi
+    INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:include>
+)
+
 add_library(industrial_bus_transport_loopback STATIC
     loopback/loopback_transport.cpp
 )
@@ -10,6 +18,8 @@ target_include_directories(industrial_bus_transport_loopback
         $<INSTALL_INTERFACE:include>
 )
 set_target_properties(industrial_bus_transport_loopback PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(industrial_bus_transport_loopback
+    PUBLIC IndustrialBus::TransportSPI)
 
 if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
     add_library(industrial_bus_transport_zeromq STATIC
@@ -29,6 +39,8 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
             cppzmq::cppzmq
     )
     set_target_properties(industrial_bus_transport_zeromq PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(industrial_bus_transport_zeromq
+        PUBLIC IndustrialBus::TransportSPI)
 
     if(BUILD_TESTING)
         add_executable(industrial_bus_zeromq_transport_test

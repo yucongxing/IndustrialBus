@@ -6,6 +6,7 @@
 #include <chrono>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 
 namespace industrial_bus::runtime {
@@ -18,6 +19,8 @@ struct TransportRuntimeOptions {
     std::string instance_id;
     std::string service_version{"0.1.0"};
     std::string auth_token;
+    std::string expected_hub_instance_id;
+    std::uint32_t expected_protocol_version{1};
     std::chrono::milliseconds handshake_timeout{std::chrono::seconds(3)};
 };
 
@@ -53,6 +56,8 @@ private:
     ConnectionState state_{ConnectionState::Disconnected};
     std::uint64_t generation_{0};
     bool registered_{false};
+    std::string registration_message_id_;
+    std::optional<Error> registration_error_;
 };
 
 }  // namespace industrial_bus::runtime

@@ -21,9 +21,10 @@ transport::ByteBuffer serializeSystemEnvelope(
     const std::string& topic,
     const std::string& payload_type,
     const google::protobuf::MessageLite& payload,
-    const std::string& auth_token) {
+    const std::string& auth_token,
+    const std::string& message_id = {}) {
     envelope::MessageEnvelope wire;
-    wire.set_message_id(generateUuidV4());
+    wire.set_message_id(message_id.empty() ? generateUuidV4() : message_id);
     wire.set_correlation_id(generateUuidV4());
     wire.set_source_node(source.node_id);
     wire.set_source_service(source.service_name);
@@ -77,6 +78,8 @@ Result<void> TransportRuntimeAdapter::start() {
             return Error::invalidArgument("runtime adapter is already started");
         }
         state_ = ConnectionState::Connecting;
+        registered_ = false;
+        registration_error_.reset();
     }
 
     auto connected = options_.connector->connect(options_.endpoint).get();
@@ -97,10 +100,18 @@ Result<void> TransportRuntimeAdapter::start() {
 
     std::unique_lock<std::mutex> lock(mutex_);
     if (!registration_cv_.wait_for(lock, options_.handshake_timeout,
-                                   [this] { return registered_; })) {
+                                   [this] {
+                                       return registered_ || registration_error_.has_value();
+                                   })) {
         lock.unlock();
         close();
         return Error::timeout("CommHub registration handshake timed out");
+    }
+    if (registration_error_) {
+        const auto error = *registration_error_;
+        lock.unlock();
+        close();
+        return error;
     }
     state_ = ConnectionState::Connected;
     ++generation_;
@@ -206,10 +217,15 @@ Result<void> TransportRuntimeAdapter::sendRegistration() {
     registration.set_instance_mode(system_proto::SINGLETON_PER_USER);
     const SourceIdentity source{options_.node_id, options_.service_name,
                                 options_.instance_id};
+    const auto registration_message_id = generateUuidV4();
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        registration_message_id_ = registration_message_id;
+    }
     const auto frame = serializeSystemEnvelope(
         source, "system.service.register",
         "industrial_bus.system.v1.ServiceRegistration", registration,
-        options_.auth_token);
+        options_.auth_token, registration_message_id);
     auto sent = connection_->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
 }
@@ -245,13 +261,30 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
     if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
         return;
     }
+    std::string registration_message_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        registration_message_id = registration_message_id_;
+    }
     if (wire.topic() == "system.service.register" &&
         wire.payload_type() == "industrial_bus.system.v1.ServiceRegistrationAck") {
         system_proto::ServiceRegistrationAck ack;
-        if (ack.ParseFromString(wire.payload())) {
+        if (ack.ParseFromString(wire.payload()) &&
+            wire.causation_id() == registration_message_id &&
+            (options_.expected_hub_instance_id.empty() ||
+             ack.hub_instance_id() == options_.expected_hub_instance_id) &&
+            ack.negotiated_protocol_version() ==
+                options_.expected_protocol_version) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 registered_ = true;
+            }
+            registration_cv_.notify_all();
+        } else {
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                registration_error_ =
+                    Error::protocol("CommHub registration Ack does not match discovery");
             }
             registration_cv_.notify_all();
         }
@@ -260,6 +293,15 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
 
     auto decoded = decodeInbound(frame);
     if (!decoded) {
+        return;
+    }
+    if (wire.causation_id() == registration_message_id &&
+        decoded.value().has_error) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            registration_error_ = decoded.value().error;
+        }
+        registration_cv_.notify_all();
         return;
     }
     ReceiveHandler handler;

@@ -31,7 +31,12 @@ enum class ConnectionState {
 
 struct ClientOptions {
     std::string service_name;
+    std::string instance_id;
+    std::string node_id{"local"};
+    std::string service_version{"0.1.0"};
     HubStartupMode startup_mode{HubStartupMode::AutoStart};
+    Duration startup_timeout{std::chrono::seconds(5)};
+    std::string hub_executable;
     std::size_t callback_threads{1};
     std::size_t outbound_capacity{1024};
     std::shared_ptr<client::IRuntimeAdapter> runtime_adapter;

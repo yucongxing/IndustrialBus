@@ -3,8 +3,6 @@ if(NOT INDUSTRIAL_BUS_ENABLE_PROTOBUF)
 endif()
 add_library(industrial_bus_runtime STATIC
     src/commhub_server.cpp
-    src/envelope_codec.cpp
-    src/transport_runtime_adapter.cpp
 )
 add_library(IndustrialBus::Runtime ALIAS industrial_bus_runtime)
 
@@ -38,4 +36,21 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
             IndustrialBus::Bootstrap
             IndustrialBus::TransportZeroMQ)
     industrial_bus_target_defaults(commhub)
+
+    if(INDUSTRIAL_BUS_BUILD_TESTS)
+        add_executable(industrial_bus_linux_client_start_test
+            tests/linux_client_start_test.cpp)
+        target_link_libraries(industrial_bus_linux_client_start_test
+            PRIVATE IndustrialBus::Client IndustrialBus::Bootstrap
+                    IndustrialBus::TransportZeroMQ)
+        target_compile_definitions(industrial_bus_linux_client_start_test
+            PRIVATE
+                INDUSTRIAL_BUS_TEST_COMMHUB_PATH="$<TARGET_FILE:commhub>")
+        add_dependencies(industrial_bus_linux_client_start_test commhub)
+        industrial_bus_target_defaults(industrial_bus_linux_client_start_test)
+        add_test(NAME industrial_bus_linux_client_start_test
+                 COMMAND industrial_bus_linux_client_start_test)
+        set_tests_properties(industrial_bus_linux_client_start_test
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 15)
+    endif()
 endif()
