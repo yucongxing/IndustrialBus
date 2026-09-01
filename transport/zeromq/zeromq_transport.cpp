@@ -364,18 +364,26 @@ private:
                     }
                     continue;
                 }
+                if (!identity_message.more()) {
+                    continue;
+                }
                 const std::string identity(static_cast<const char*>(identity_message.data()),
                                            identity_message.size());
                 zmq::message_t frame_message;
-                if (!socket.recv(frame_message, zmq::recv_flags::none)) {
+                if (!socket.recv(frame_message, zmq::recv_flags::dontwait)) {
                     continue;
                 }
+                bool complete_frame = true;
                 while (frame_message.more()) {
                     zmq::message_t next;
-                    if (!socket.recv(next, zmq::recv_flags::none)) {
+                    if (!socket.recv(next, zmq::recv_flags::dontwait)) {
+                        complete_frame = false;
                         break;
                     }
                     frame_message = std::move(next);
+                }
+                if (!complete_frame) {
+                    continue;
                 }
 
                 std::shared_ptr<RouterPeer> peer;

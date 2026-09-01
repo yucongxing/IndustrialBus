@@ -1,7 +1,6 @@
 #include "industrial_bus/transport/transport.h"
 #include "zeromq_transport.h"
 
-#include <cassert>
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
@@ -44,18 +43,30 @@ int main() {
 
     ZeroMqDealerConnector connector;
     auto connected = connector.connect(endpoint).get();
-    assert(connected);
+    if (!connected) {
+        std::cerr << "connect failed: " << connected.error().message << '\n';
+        return 1;
+    }
     auto client = std::move(connected).value();
     const ByteBuffer payload{9, 8, 7};
-    assert(client->send(ByteView(payload)));
+    if (!client->send(ByteView(payload))) {
+        std::cerr << "client send failed\n";
+        return 1;
+    }
 
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(ready.wait_for(lock, std::chrono::seconds(2), [&] {
-            return server_received == payload;
-        }));
+        if (!ready.wait_for(lock, std::chrono::seconds(2), [&] {
+                return server_received == payload;
+            })) {
+            std::cerr << "server receive timed out\n";
+            return 1;
+        }
     }
-    assert(server);
+    if (!server) {
+        std::cerr << "server peer was not accepted\n";
+        return 1;
+    }
 
     ByteBuffer client_received;
     client->setReceiveHandler([&](ByteBuffer frame) {
@@ -65,15 +76,27 @@ int main() {
         }
         ready.notify_all();
     });
-    assert(server->send(ByteView(payload)));
+    if (!server->send(ByteView(payload))) {
+        std::cerr << "server send failed\n";
+        return 1;
+    }
     {
         std::unique_lock<std::mutex> lock(mutex);
-        assert(ready.wait_for(lock, std::chrono::seconds(2), [&] {
-            return client_received == payload;
-        }));
+        if (!ready.wait_for(lock, std::chrono::seconds(2), [&] {
+                return client_received == payload;
+            })) {
+            std::cerr << "client receive timed out\n";
+            return 1;
+        }
     }
 
-    client->close();
+    const auto close_started = std::chrono::steady_clock::now();
     listener.close();
+    const auto close_elapsed = std::chrono::steady_clock::now() - close_started;
+    if (close_elapsed >= std::chrono::seconds(1)) {
+        std::cerr << "listener close exceeded one second\n";
+        return 1;
+    }
+    client->close();
     std::remove(socket_path.c_str());
 }

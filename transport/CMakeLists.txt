@@ -52,7 +52,7 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
         add_test(NAME industrial_bus_zeromq_transport_test
                  COMMAND industrial_bus_zeromq_transport_test)
         set_tests_properties(industrial_bus_zeromq_transport_test
-            PROPERTIES SKIP_RETURN_CODE 77)
+            PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 5)
     endif()
 endif()
 
