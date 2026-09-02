@@ -3,6 +3,7 @@
 #include "industrial_bus/topic.h"
 
 #include "cmp.pb.h"
+#include "logging.pb.h"
 #include "system.pb.h"
 
 namespace industrial_bus::examples {
@@ -24,5 +25,9 @@ inline constexpr EventTopic<cmp::v1::SimulationCompleted>
 inline constexpr EventTopic<cmp::v1::SimulationFailed>
     simulation_failed{"cmp.simulation.failed",
                       "industrial_bus.cmp.v1.SimulationFailed"};
+
+inline constexpr EventTopic<logging::v1::LogEvent>
+    application_log{"application.log",
+                    "industrial_bus.logging.v1.LogEvent"};
 
 }  // namespace industrial_bus::examples

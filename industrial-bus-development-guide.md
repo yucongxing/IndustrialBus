@@ -1780,10 +1780,12 @@ Progress/Completed/Failed Event；后者通过私有 append-only journal 持久�
 幂等接受和 Event 路由的最小闭环。示例 DataRef URI 不创建真实 OASIS 文件，也暂不
 实现 checksum、TTL/release、取消和 Qt 5.13 UI 线程投递；这些仍属于后续产品接入。
 
-示例应用入口不直接依赖 IndustrialBus 或 Protobuf。`simple_logger.h` 提供简单的
-应用日志接口，`simulation_app.h` 提供纯 C++ 业务门面，BusClient、Topic、schema 和
-journal 统一隔离在 `simulated_app_support` 的 bus-backed 实现中。Logger 只承载诊断
-日志，不能把 Command/Event 的业务语义退化为日志字符串。
+示例应用入口不直接依赖 IndustrialBus 或 Protobuf。`simple_logger.h` 提供 Logger
+分发器、`LogSink` 接口和 `ConsoleSink`，`simulation_app.h` 提供纯 C++ 业务门面；
+BusClient、Topic、schema、journal 和异步有界 `BusLogSink` 统一隔离在
+`simulated_app_support` 的 bus-backed 实现中。适配器连接后复用同一个 BusClient
+挂载 BusLogSink，断开前先移除并排空。Logger 只承载诊断日志，不能把
+Command/Event 的业务语义退化为日志字符串。
 
 ## 33. 总结
 

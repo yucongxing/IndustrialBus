@@ -14,16 +14,18 @@ publishes the final result DataRef.
 The two `main` files do not include or name BusClient, Protobuf, Topic types, or
 the idempotency journal. They use two small application-facing pieces:
 
-- `simple_logger.h`: a transport-neutral Logger with a thread-safe console
-  implementation;
+- `simple_logger.h`: a transport-neutral Logger dispatcher and `LogSink`
+  interface with a thread-safe `ConsoleSink`;
 - `simulation_app.h`: plain C++ options plus LayoutView client, CMPSuite
   service, and SimulationJob interfaces.
 
 `simulated_app_support` implements those interfaces. All IndustrialBus and
 Protobuf code is isolated in `bus_simulation_adapter.cpp` and the private
-`simulation_topics.h` catalog. Logger is intentionally not used as an RPC
-abstraction: it records diagnostics, while the facade preserves explicit
-Command, progress, completion, and failure semantics.
+`simulation_topics.h` catalog. On connection, the adapter attaches a bounded
+asynchronous `BusLogSink` to the same Logger and reuses the existing BusClient;
+on shutdown it removes and drains the Sink before closing the client. Logger
+records diagnostics, while the facade preserves explicit Command, progress,
+completion, and failure semantics.
 
 ## Build
 

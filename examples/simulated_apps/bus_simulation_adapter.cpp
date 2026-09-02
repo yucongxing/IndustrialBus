@@ -10,6 +10,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdlib>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -20,6 +21,102 @@ namespace simulated_apps {
 namespace {
 
 using namespace std::chrono_literals;
+
+class BusLogSink final : public LogSink {
+public:
+    BusLogSink(std::weak_ptr<industrial_bus::BusClient> bus,
+               std::string service)
+        : bus_(std::move(bus)),
+          service_(std::move(service)),
+          worker_([this] { run(); }) {}
+
+    ~BusLogSink() override { stop(); }
+
+    void write(const LogRecord& record) noexcept override {
+        try {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (stopping_) {
+                return;
+            }
+            if (records_.size() == capacity_) {
+                records_.pop_front();
+            }
+            records_.push_back(record);
+            ready_.notify_one();
+        } catch (...) {
+            // Bus logging is best effort and must never recurse into Logger.
+        }
+    }
+
+    void stop() noexcept {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            stopping_ = true;
+        }
+        ready_.notify_all();
+        if (worker_.joinable() && worker_.get_id() != std::this_thread::get_id()) {
+            worker_.join();
+        }
+    }
+
+private:
+    static industrial_bus::logging::v1::LogLevel toProtocolLevel(
+        LogLevel level) noexcept {
+        switch (level) {
+            case LogLevel::Info:
+                return industrial_bus::logging::v1::INFO;
+            case LogLevel::Warning:
+                return industrial_bus::logging::v1::WARN;
+            case LogLevel::Error:
+                return industrial_bus::logging::v1::LOG_ERROR;
+        }
+        return industrial_bus::logging::v1::LOG_LEVEL_UNSPECIFIED;
+    }
+
+    void run() noexcept {
+        for (;;) {
+            LogRecord record;
+            {
+                std::unique_lock<std::mutex> lock(mutex_);
+                ready_.wait(lock,
+                            [&] { return stopping_ || !records_.empty(); });
+                if (records_.empty()) {
+                    if (stopping_) {
+                        return;
+                    }
+                    continue;
+                }
+                record = std::move(records_.front());
+                records_.pop_front();
+            }
+
+            const auto bus = bus_.lock();
+            if (!bus) {
+                continue;
+            }
+            industrial_bus::logging::v1::LogEvent event;
+            event.set_timestamp_unix_ns(record.timestamp_unix_ns);
+            event.set_service(service_);
+            event.set_module(std::move(record.component));
+            event.set_level(toProtocolLevel(record.level));
+            event.set_category("application");
+            event.set_message(std::move(record.message));
+            event.set_thread_id(record.thread_id);
+            event.set_sequence(++sequence_);
+            (void)bus->publish(industrial_bus::examples::application_log, event);
+        }
+    }
+
+    static constexpr std::size_t capacity_{256};
+    std::weak_ptr<industrial_bus::BusClient> bus_;
+    std::string service_;
+    std::mutex mutex_;
+    std::condition_variable ready_;
+    std::deque<LogRecord> records_;
+    bool stopping_{false};
+    std::uint64_t sequence_{0};
+    std::thread worker_;
+};
 
 class BusLayoutViewClient final : public LayoutViewClient {
 public:
@@ -39,6 +136,9 @@ public:
             return false;
         }
         bus_ = connected.value();
+        bus_log_sink_ =
+            std::make_shared<BusLogSink>(bus_, "layout-view");
+        bus_log_sink_id_ = logger_->addSink(bus_log_sink_);
         logger_->info("connected as layout-view");
         return true;
     }
@@ -163,6 +263,12 @@ public:
     }
 
     void stop() noexcept override {
+        logger_->removeSink(bus_log_sink_id_);
+        bus_log_sink_id_ = 0;
+        if (bus_log_sink_) {
+            bus_log_sink_->stop();
+            bus_log_sink_.reset();
+        }
         auto bus = std::move(bus_);
         if (bus) {
             (void)bus->shutdown(200ms);
@@ -173,6 +279,8 @@ private:
     LayoutViewOptions options_;
     std::shared_ptr<Logger> logger_;
     std::shared_ptr<industrial_bus::BusClient> bus_;
+    std::shared_ptr<BusLogSink> bus_log_sink_;
+    Logger::SinkId bus_log_sink_id_{0};
 };
 
 class BusSimulationJob final : public SimulationJob {
@@ -338,6 +446,9 @@ public:
             return false;
         }
         bus_ = connected.value();
+        bus_log_sink_ =
+            std::make_shared<BusLogSink>(bus_, "cmp-suite");
+        bus_log_sink_id_ = logger_->addSink(bus_log_sink_);
         command_handler_ = bus_->handleCommand(
             industrial_bus::examples::run_simulation,
             [this, handler = std::move(handler)](
@@ -404,6 +515,12 @@ public:
                 worker.join();
             }
         }
+        logger_->removeSink(bus_log_sink_id_);
+        bus_log_sink_id_ = 0;
+        if (bus_log_sink_) {
+            bus_log_sink_->stop();
+            bus_log_sink_.reset();
+        }
         auto bus = std::move(bus_);
         if (bus) {
             (void)bus->shutdown(200ms);
@@ -416,6 +533,8 @@ private:
     std::shared_ptr<Logger> logger_;
     std::shared_ptr<industrial_bus::core::IdempotencyJournal> journal_;
     std::shared_ptr<industrial_bus::BusClient> bus_;
+    std::shared_ptr<BusLogSink> bus_log_sink_;
+    Logger::SinkId bus_log_sink_id_{0};
     industrial_bus::Subscription command_handler_;
     std::mutex workers_mutex_;
     std::vector<std::thread> workers_;
