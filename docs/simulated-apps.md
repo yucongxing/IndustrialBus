@@ -9,6 +9,9 @@ subscriptions, and submits an idempotent `cmp.simulation.run` Command to
 accepted operation, publishes five progress events, persists Completed, and
 publishes the final result DataRef.
 
+For a message-by-message explanation with architecture and sequence diagrams,
+see [LayoutView and CMPSuite communication](simulated-communication.md).
+
 ## Dependency boundary
 
 The two `main` files do not include or name BusClient, Protobuf, Topic types, or

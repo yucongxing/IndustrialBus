@@ -165,6 +165,7 @@ DataRef checksum/lifetime management, or production state-directory policy.
 - Support targets: `simulated_logger` and `simulated_app_support`
 - Public example interfaces: `simulation_app.h` and `simple_logger.h`
 - Bus boundary: `bus_simulation_adapter.cpp` and `simulation_topics.h`
+- Detailed flow: `docs/simulated-communication.md`
 - Build option: `INDUSTRIAL_BUS_BUILD_SIMULATED_APPS` (default `ON`, requires
   Protobuf and ZeroMQ)
 - Tests: Logger level/component formatting and Sink fan-out through GoogleTest
