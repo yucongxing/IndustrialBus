@@ -26,4 +26,11 @@ if(INDUSTRIAL_BUS_BUILD_TESTS)
         PRIVATE simulated_logger GTest::gtest_main)
     industrial_bus_target_defaults(simulated_logger_test)
     gtest_discover_tests(simulated_logger_test)
+
+    add_executable(simulated_channel_test simulation_channel_test.cpp)
+    target_link_libraries(simulated_channel_test
+        PRIVATE simulated_app_support IndustrialBus::Protocol IndustrialBus::Core
+                GTest::gtest_main)
+    industrial_bus_target_defaults(simulated_channel_test)
+    gtest_discover_tests(simulated_channel_test)
 endif()

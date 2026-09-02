@@ -23,9 +23,8 @@ extern "C" void requestStop(int) {
 struct Options {
     bool once{false};
     std::string hub_executable{simulated_apps::defaultCommHubExecutable()};
-    std::string journal_path{
-        "/tmp/industrial-bus-cmpsuite-" +
-        std::to_string(static_cast<long>(::getuid())) + ".journal"};
+    std::string journal_path;
+    std::string channel_id;
 };
 
 Options parseOptions(int argc, char** argv) {
@@ -34,14 +33,28 @@ Options parseOptions(int argc, char** argv) {
         const std::string argument = argv[index];
         if (argument == "--once") {
             options.once = true;
+        } else if (argument == "--channel" && index + 1 < argc) {
+            options.channel_id = argv[++index];
         } else if (argument == "--hub" && index + 1 < argc) {
             options.hub_executable = argv[++index];
         } else if (argument == "--journal" && index + 1 < argc) {
             options.journal_path = argv[++index];
         } else {
             throw std::invalid_argument(
-                "usage: cmpsuite_sim [--once] [--hub PATH] [--journal PATH]");
+                "usage: cmpsuite_sim [--once] [--channel UUID] [--hub PATH] "
+                "[--journal PATH]");
         }
+    }
+    if (options.channel_id.empty()) {
+        options.channel_id = simulated_apps::generateChannelId();
+    } else if (!simulated_apps::isValidChannelId(options.channel_id)) {
+        throw std::invalid_argument("--channel must be a UUID");
+    }
+    if (options.journal_path.empty()) {
+        options.journal_path =
+            "/tmp/industrial-bus-cmpsuite-" +
+            std::to_string(static_cast<long>(::getuid())) + "-" +
+            options.channel_id + ".journal";
     }
     return options;
 }
@@ -52,8 +65,13 @@ int main(int argc, char** argv) {
     try {
         const auto options = parseOptions(argc, argv);
         auto logger = simulated_apps::makeConsoleLogger("CMPSuite");
-        auto service = simulated_apps::makeCmpSuiteService(
-            {options.hub_executable, options.journal_path}, logger);
+        logger->info("channel=" + options.channel_id);
+        simulated_apps::CmpSuiteOptions service_options;
+        service_options.hub_executable = options.hub_executable;
+        service_options.journal_path = options.journal_path;
+        service_options.channel_id = options.channel_id;
+        auto service =
+            simulated_apps::makeCmpSuiteService(service_options, logger);
         std::atomic<bool> completed_once{false};
         std::string error;
         if (!service->start(

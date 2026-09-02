@@ -62,6 +62,17 @@ TEST(CommHubRouterTest, RoutesExactlyAcrossMultipleServiceInstances) {
                                         "local"));
     EXPECT_EQ(hub.services().allInstances().size(), 2U);
 
+    RouteMessage event;
+    event.message_id = "progress-b";
+    event.source_service = "cmp-suite";
+    event.source_instance = "channel-b";
+    event.topic = "cmp.channel.channel-b.simulation.progress";
+    event.kind = MessageKind::event;
+    const auto no_subscribers =
+        hub.dispatch("cmp-b", event, now, unix_now);
+    ASSERT_TRUE(no_subscribers);
+    EXPECT_TRUE(no_subscribers.targets.empty());
+
     ASSERT_TRUE(hub.connect(session("singleton", "cmp-suite", "channel-c"),
                             now));
     const auto conflict = hub.registerService(

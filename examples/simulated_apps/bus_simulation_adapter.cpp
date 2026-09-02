@@ -6,6 +6,7 @@
 #include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -25,9 +26,12 @@ using namespace std::chrono_literals;
 class BusLogSink final : public LogSink {
 public:
     BusLogSink(std::weak_ptr<industrial_bus::BusClient> bus,
-               std::string service)
+               std::string service,
+               std::shared_ptr<const industrial_bus::examples::ChannelTopics>
+                   topics)
         : bus_(std::move(bus)),
           service_(std::move(service)),
+          topics_(std::move(topics)),
           worker_([this] { run(); }) {}
 
     ~BusLogSink() override { stop(); }
@@ -103,13 +107,14 @@ private:
             event.set_message(std::move(record.message));
             event.set_thread_id(record.thread_id);
             event.set_sequence(++sequence_);
-            (void)bus->publish(industrial_bus::examples::application_log, event);
+            (void)bus->publish(topics_->applicationLog(), event);
         }
     }
 
     static constexpr std::size_t capacity_{256};
     std::weak_ptr<industrial_bus::BusClient> bus_;
     std::string service_;
+    std::shared_ptr<const industrial_bus::examples::ChannelTopics> topics_;
     std::mutex mutex_;
     std::condition_variable ready_;
     std::deque<LogRecord> records_;
@@ -127,8 +132,16 @@ public:
     ~BusLayoutViewClient() override { stop(); }
 
     bool start(std::string& error) override {
+        if (!options_.channel_id.empty() &&
+            !industrial_bus::examples::isValidChannelId(
+                options_.channel_id)) {
+            error = "LayoutView channel must be a UUID";
+            return false;
+        }
         industrial_bus::ClientOptions options;
         options.service_name = "layout-view";
+        options.instance_id = industrial_bus::generateUuidV4();
+        options.instance_mode = industrial_bus::InstanceMode::MultiInstance;
         options.hub_executable = options_.hub_executable;
         auto connected = industrial_bus::BusClient::connect(options);
         if (!connected) {
@@ -136,11 +149,32 @@ public:
             return false;
         }
         bus_ = connected.value();
-        bus_log_sink_ =
-            std::make_shared<BusLogSink>(bus_, "layout-view");
-        bus_log_sink_id_ = logger_->addSink(bus_log_sink_);
+        if (!options_.channel_id.empty()) {
+            topics_ = std::make_shared<industrial_bus::examples::ChannelTopics>(
+                options_.channel_id);
+            bus_log_sink_ =
+                std::make_shared<BusLogSink>(bus_, "layout-view", topics_);
+            bus_log_sink_id_ = logger_->addSink(bus_log_sink_);
+        }
         logger_->info("connected as layout-view");
         return true;
+    }
+
+    std::vector<std::string> channels() const override {
+        std::vector<std::string> result;
+        if (!bus_) {
+            return result;
+        }
+        for (const auto& service : bus_->services()) {
+            if (service.service_name == "cmp-suite" &&
+                industrial_bus::examples::isValidChannelId(
+                    service.instance_id)) {
+                result.push_back(service.instance_id);
+            }
+        }
+        std::sort(result.begin(), result.end());
+        result.erase(std::unique(result.begin(), result.end()), result.end());
+        return result;
     }
 
     bool runSimulation(const RunSimulationOptions& options,
@@ -148,6 +182,10 @@ public:
                        std::string& error) override {
         if (!bus_) {
             error = "LayoutView client is not started";
+            return false;
+        }
+        if (!topics_) {
+            error = "LayoutView requires a channel to run a simulation";
             return false;
         }
         const auto operation_id = industrial_bus::generateUuidV4();
@@ -163,7 +201,7 @@ public:
         auto logger = logger_;
 
         auto progress = bus_->subscribe(
-            industrial_bus::examples::simulation_progress,
+            topics_->simulationProgress(),
             [logger, operation_id](
                 const industrial_bus::cmp::v1::SimulationProgress& event) {
                 if (event.operation_id() != operation_id) {
@@ -176,7 +214,7 @@ public:
                     "% - " + event.message());
             });
         auto completed = bus_->subscribe(
-            industrial_bus::examples::simulation_completed,
+            topics_->simulationCompleted(),
             [outcome, operation_id](
                 const industrial_bus::cmp::v1::SimulationCompleted& event) {
                 if (event.operation_id() != operation_id) {
@@ -191,7 +229,7 @@ public:
                 outcome->finished_cv.notify_all();
             });
         auto failed = bus_->subscribe(
-            industrial_bus::examples::simulation_failed,
+            topics_->simulationFailed(),
             [outcome, operation_id](
                 const industrial_bus::cmp::v1::SimulationFailed& event) {
                 if (event.operation_id() != operation_id) {
@@ -230,8 +268,8 @@ public:
         command_options.accept_timeout = 5s;
         logger_->info("requesting CMP operation " + operation_id);
         auto accepted = bus_->command(
-            industrial_bus::Destination{"cmp-suite", {}},
-            industrial_bus::examples::run_simulation, command,
+            industrial_bus::Destination{"cmp-suite", options_.channel_id},
+            topics_->runSimulation(), command,
             command_options);
         if (accepted.wait_for(6s) != std::future_status::ready) {
             error = "timed out waiting for CommandAck";
@@ -279,6 +317,7 @@ private:
     LayoutViewOptions options_;
     std::shared_ptr<Logger> logger_;
     std::shared_ptr<industrial_bus::BusClient> bus_;
+    std::shared_ptr<const industrial_bus::examples::ChannelTopics> topics_;
     std::shared_ptr<BusLogSink> bus_log_sink_;
     Logger::SinkId bus_log_sink_id_{0};
 };
@@ -292,14 +331,16 @@ public:
         std::string operation_id,
         std::string input_uri,
         std::size_t steps,
-        std::shared_ptr<Logger> logger)
+        std::shared_ptr<Logger> logger,
+        std::shared_ptr<const industrial_bus::examples::ChannelTopics> topics)
         : bus_(std::move(bus)),
           journal_(std::move(journal)),
           identity_(std::move(identity)),
           operation_id_(std::move(operation_id)),
           input_uri_(std::move(input_uri)),
           steps_(steps),
-          logger_(std::move(logger)) {}
+          logger_(std::move(logger)),
+          topics_(std::move(topics)) {}
 
     const std::string& operationId() const noexcept override {
         return operation_id_;
@@ -325,7 +366,7 @@ public:
         industrial_bus::PublishOptions options;
         options.operation_id = operation_id_;
         const auto published = bus_->publish(
-            industrial_bus::examples::simulation_progress, progress, options);
+            topics_->simulationProgress(), progress, options);
         if (!published) {
             logger_->error("progress publish failed: " +
                            published.error().message);
@@ -360,7 +401,7 @@ public:
         industrial_bus::PublishOptions options;
         options.operation_id = operation_id_;
         const auto published = bus_->publish(
-            industrial_bus::examples::simulation_completed, completed, options);
+            topics_->simulationCompleted(), completed, options);
         if (!published) {
             logger_->error("completion publish failed: " +
                            published.error().message);
@@ -396,7 +437,7 @@ private:
         industrial_bus::PublishOptions options;
         options.operation_id = operation_id_;
         const auto published = bus_->publish(
-            industrial_bus::examples::simulation_failed, failed, options);
+            topics_->simulationFailed(), failed, options);
         if (!published) {
             logger_->error("failure event publish failed: " +
                            published.error().message);
@@ -411,6 +452,7 @@ private:
     std::string input_uri_;
     std::size_t steps_;
     std::shared_ptr<Logger> logger_;
+    std::shared_ptr<const industrial_bus::examples::ChannelTopics> topics_;
     std::atomic<bool> terminal_{false};
 };
 
@@ -423,6 +465,10 @@ public:
     ~BusCmpSuiteService() override { stop(); }
 
     bool start(SimulationHandler handler, std::string& error) override {
+        if (!industrial_bus::examples::isValidChannelId(options_.channel_id)) {
+            error = "CMPSuite channel must be a UUID";
+            return false;
+        }
         industrial_bus::core::IdempotencyJournalOptions journal_options;
         journal_options.path = options_.journal_path;
         auto opened = industrial_bus::core::IdempotencyJournal::open(
@@ -434,9 +480,13 @@ public:
         journal_ =
             std::shared_ptr<industrial_bus::core::IdempotencyJournal>(
                 std::move(opened.value()));
+        topics_ = std::make_shared<industrial_bus::examples::ChannelTopics>(
+            options_.channel_id);
 
         industrial_bus::ClientOptions client_options;
         client_options.service_name = "cmp-suite";
+        client_options.instance_id = options_.channel_id;
+        client_options.instance_mode = industrial_bus::InstanceMode::MultiInstance;
         client_options.hub_executable = options_.hub_executable;
         client_options.idempotency_journal = journal_;
         auto connected = industrial_bus::BusClient::connect(client_options);
@@ -446,11 +496,28 @@ public:
             return false;
         }
         bus_ = connected.value();
+        auto interruption = industrial_bus::Error::ownerUnavailable(
+            "CMPSuite process was interrupted before completion");
+        interruption.context["recovery"] = "startup";
+        auto recovered = journal_->failNonTerminal(std::move(interruption));
+        if (!recovered) {
+            error = recovered.error().message;
+            auto bus = std::move(bus_);
+            (void)bus->shutdown(200ms);
+            topics_.reset();
+            journal_.reset();
+            return false;
+        }
         bus_log_sink_ =
-            std::make_shared<BusLogSink>(bus_, "cmp-suite");
+            std::make_shared<BusLogSink>(bus_, "cmp-suite", topics_);
         bus_log_sink_id_ = logger_->addSink(bus_log_sink_);
+        if (recovered.value() != 0) {
+            logger_->warning(
+                "marked " + std::to_string(recovered.value()) +
+                " interrupted operation(s) as failed");
+        }
         command_handler_ = bus_->handleCommand(
-            industrial_bus::examples::run_simulation,
+            topics_->runSimulation(),
             [this, handler = std::move(handler)](
                 const industrial_bus::cmp::v1::RunSimulation& command,
                 const industrial_bus::MessageContext& context)
@@ -476,10 +543,10 @@ public:
                     bus_, journal_,
                     industrial_bus::core::CommandIdentity{
                         context.source_service,
-                        std::string(
-                            industrial_bus::examples::run_simulation.name),
+                        std::string(topics_->runSimulation().name),
                         context.idempotency_key},
-                    operation_id, command.input_layout().uri(), steps, logger_);
+                    operation_id, command.input_layout().uri(), steps, logger_,
+                    topics_);
                 workers_.emplace_back([handler, job] {
                     try {
                         handler(job);
@@ -494,11 +561,13 @@ public:
                 return {};
             });
         if (!command_handler_) {
-            error = "failed to register cmp.simulation.run";
+            error = "failed to register " +
+                    std::string(topics_->runSimulation().name);
             stop();
             return false;
         }
-        logger_->info("ready; journal=" + options_.journal_path);
+        logger_->info("ready; channel=" + options_.channel_id +
+                      "; journal=" + options_.journal_path);
         return true;
     }
 
@@ -526,6 +595,7 @@ public:
             (void)bus->shutdown(200ms);
         }
         journal_.reset();
+        topics_.reset();
     }
 
 private:
@@ -533,6 +603,7 @@ private:
     std::shared_ptr<Logger> logger_;
     std::shared_ptr<industrial_bus::core::IdempotencyJournal> journal_;
     std::shared_ptr<industrial_bus::BusClient> bus_;
+    std::shared_ptr<const industrial_bus::examples::ChannelTopics> topics_;
     std::shared_ptr<BusLogSink> bus_log_sink_;
     Logger::SinkId bus_log_sink_id_{0};
     industrial_bus::Subscription command_handler_;
@@ -545,6 +616,14 @@ private:
 
 std::string defaultCommHubExecutable() {
     return INDUSTRIAL_BUS_SIM_COMMHUB_PATH;
+}
+
+std::string generateChannelId() {
+    return industrial_bus::generateUuidV4();
+}
+
+bool isValidChannelId(std::string_view channel_id) noexcept {
+    return industrial_bus::examples::isValidChannelId(channel_id);
 }
 
 std::unique_ptr<LayoutViewClient> makeLayoutViewClient(

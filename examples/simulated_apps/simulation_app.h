@@ -7,13 +7,18 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
+#include <vector>
 
 namespace simulated_apps {
 
 std::string defaultCommHubExecutable();
+std::string generateChannelId();
+bool isValidChannelId(std::string_view channel_id) noexcept;
 
 struct LayoutViewOptions {
     std::string hub_executable;
+    std::string channel_id;
     std::chrono::seconds timeout{15};
 };
 
@@ -26,6 +31,7 @@ class LayoutViewClient {
 public:
     virtual ~LayoutViewClient() = default;
     virtual bool start(std::string& error) = 0;
+    virtual std::vector<std::string> channels() const = 0;
     virtual bool runSimulation(const RunSimulationOptions& options,
                                std::string& result_uri,
                                std::string& error) = 0;
@@ -39,6 +45,7 @@ std::unique_ptr<LayoutViewClient> makeLayoutViewClient(
 struct CmpSuiteOptions {
     std::string hub_executable;
     std::string journal_path;
+    std::string channel_id;
 };
 
 class SimulationJob {
