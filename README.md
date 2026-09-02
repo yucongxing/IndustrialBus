@@ -13,6 +13,9 @@ Implementation-facing module documentation is maintained in
 [`docs/`](docs/README.md) and must be updated with responsibility or lifecycle
 changes.
 
+A runnable non-Qt LayoutView/CMPSuite flow is available in
+[`examples/simulated_apps/`](docs/simulated-apps.md).
+
 ## Build
 
 Dependencies are installed locally and discovered with `find_package()`.

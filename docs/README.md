@@ -7,6 +7,7 @@ ownership, target layout, runtime lifecycles, and test coverage.
 - [Module responsibilities](modules.md)
 - [Runtime lifecycle](runtime-lifecycle.md)
 - [Testing](testing.md)
+- [Simulated LayoutView/CMPSuite](simulated-apps.md)
 
 Documentation is part of the definition of done. A change that moves a
 responsibility, adds a public option or wire message, changes a thread/process

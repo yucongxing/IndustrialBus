@@ -14,6 +14,8 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 option(INDUSTRIAL_BUS_ENABLE_PROTOBUF "Build Protobuf protocol targets" ON)
 option(INDUSTRIAL_BUS_ENABLE_ZEROMQ "Build ZeroMQ transport and CommHub" ON)
 option(INDUSTRIAL_BUS_BUILD_TESTS "Build IndustrialBus tests" ${BUILD_TESTING})
+option(INDUSTRIAL_BUS_BUILD_SIMULATED_APPS
+       "Build the non-Qt LayoutView and CMPSuite simulation programs" ON)
 
 if(BUILD_TESTING OR INDUSTRIAL_BUS_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
@@ -51,3 +53,12 @@ foreach(component IN ITEMS core protocol transport bootstrap client integration 
         add_subdirectory(${component})
     endif()
 endforeach()
+
+if(INDUSTRIAL_BUS_BUILD_SIMULATED_APPS)
+    if(INDUSTRIAL_BUS_ENABLE_PROTOBUF AND INDUSTRIAL_BUS_ENABLE_ZEROMQ)
+        add_subdirectory(examples/simulated_apps)
+    else()
+        message(STATUS
+            "Skipping simulated apps because Protobuf or ZeroMQ is disabled")
+    endif()
+endif()

@@ -1768,6 +1768,18 @@ sequenceDiagram
 
 该流程中每条消息都有新的 `message_id`，`correlation_id` 全程不变，派生消息用 `causation_id` 指向直接原因。CMPSuite 和 LayoutBoolean 不需要知道彼此的进程 ID、端口或 Transport 实现，只依赖服务名、Ack 返回的 owner instance、Topic 和协议类型。若 Accepted 后链路中断，CMPSuite 不重放 Command，而是在恢复后查询原 Operation 状态。
 
+### 32.1 首个可运行最小实现
+
+仓库中的 `examples/simulated_apps` 提供纯 C++17、无 Qt 的
+`layoutview_sim` 和 `cmpsuite_sim`。前者向 `cmp-suite` 发送带
+`operation_id` 与 `idempotency_key` 的 `cmp.simulation.run` Command，并订阅
+Progress/Completed/Failed Event；后者通过私有 append-only journal 持久化接受，
+在工作线程模拟五个计算阶段，先持久化 Completed，再发布最终 DataRef Event。
+
+该示例用于验证 CommHub 自动启动、服务注册、强类型 Protobuf 消息、CommandAck、
+幂等接受和 Event 路由的最小闭环。示例 DataRef URI 不创建真实 OASIS 文件，也暂不
+实现 checksum、TTL/release、取消和 Qt 5.13 UI 线程投递；这些仍属于后续产品接入。
+
 ## 33. 总结
 
 推荐的实施基线为：

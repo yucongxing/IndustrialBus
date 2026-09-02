@@ -140,3 +140,20 @@ and the Linux automatic reconnect supervisor remain future work.
 - Executable: conditional `commhub`
 - Tests: Envelope/Error codec, Loopback routing and authentication, heartbeat
   keepalive/loss/expiry, and real Linux discovery/AutoStart
+
+## `examples/simulated_apps`
+
+Owns the first runnable, non-Qt product-shaped example. `layoutview_sim`
+subscribes to CMP progress/final events and submits an idempotent
+`cmp.simulation.run` Command. `cmpsuite_sim` durably accepts that Command,
+executes a short simulated job, persists its terminal journal state, and
+publishes progress and completion events.
+
+The examples demonstrate the application API and wire schemas only. They do
+not implement real layout file creation, CMP algorithms, Qt UI integration,
+DataRef checksum/lifetime management, or production state-directory policy.
+
+- Executables: conditional `layoutview_sim` and `cmpsuite_sim`
+- Shared catalog: `simulation_topics.h`
+- Build option: `INDUSTRIAL_BUS_BUILD_SIMULATED_APPS` (default `ON`, requires
+  Protobuf and ZeroMQ)
