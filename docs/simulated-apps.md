@@ -9,6 +9,22 @@ subscriptions, and submits an idempotent `cmp.simulation.run` Command to
 accepted operation, publishes five progress events, persists Completed, and
 publishes the final result DataRef.
 
+## Dependency boundary
+
+The two `main` files do not include or name BusClient, Protobuf, Topic types, or
+the idempotency journal. They use two small application-facing pieces:
+
+- `simple_logger.h`: a transport-neutral Logger with a thread-safe console
+  implementation;
+- `simulation_app.h`: plain C++ options plus LayoutView client, CMPSuite
+  service, and SimulationJob interfaces.
+
+`simulated_app_support` implements those interfaces. All IndustrialBus and
+Protobuf code is isolated in `bus_simulation_adapter.cpp` and the private
+`simulation_topics.h` catalog. Logger is intentionally not used as an RPC
+abstraction: it records diagnostics, while the facade preserves explicit
+Command, progress, completion, and failure semantics.
+
 ## Build
 
 Use the same local dependency prefixes as the main project:

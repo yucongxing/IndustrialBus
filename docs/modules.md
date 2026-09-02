@@ -149,11 +149,22 @@ subscribes to CMP progress/final events and submits an idempotent
 executes a short simulated job, persists its terminal journal state, and
 publishes progress and completion events.
 
+The two executable sources depend only on the STL-facing `simulation_app.h`
+facade and `simple_logger.h`. `simulated_logger` owns the transport-neutral
+Logger, while `simulated_app_support` owns the bus-backed
+implementation; only `bus_simulation_adapter.cpp` and its private Topic catalog
+include IndustrialBus, Protobuf, or the idempotency journal. The Logger remains
+a transport-neutral diagnostic interface and does not pretend that business
+Commands or Events are log records.
+
 The examples demonstrate the application API and wire schemas only. They do
 not implement real layout file creation, CMP algorithms, Qt UI integration,
 DataRef checksum/lifetime management, or production state-directory policy.
 
 - Executables: conditional `layoutview_sim` and `cmpsuite_sim`
-- Shared catalog: `simulation_topics.h`
+- Support targets: `simulated_logger` and `simulated_app_support`
+- Public example interfaces: `simulation_app.h` and `simple_logger.h`
+- Bus boundary: `bus_simulation_adapter.cpp` and `simulation_topics.h`
 - Build option: `INDUSTRIAL_BUS_BUILD_SIMULATED_APPS` (default `ON`, requires
   Protobuf and ZeroMQ)
+- Tests: Logger level/component formatting through GoogleTest
