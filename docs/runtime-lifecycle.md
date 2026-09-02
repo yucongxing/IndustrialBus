@@ -9,9 +9,31 @@
    performs a second discovery check, and launches the trusted absolute CommHub
    executable only while owning that lock.
 3. `TransportRuntimeAdapter` opens a DEALER connection and sends authenticated
-   `ServiceRegistration`.
+   `ServiceRegistration`, including `SingletonPerUser` or `MultiInstance`.
 4. The client becomes Connected only after a matching registration Ack verifies
-   causation, protocol version, and the discovered Hub instance ID.
+   causation, protocol version, and the discovered Hub instance ID. The Ack
+   also installs a revisioned snapshot of every registered service instance.
+
+`SingletonPerUser` is the compatibility default: another online instance of
+the same service name conflicts. `MultiInstance` permits several instances of
+that service, but each `(service_name, instance_id)` pair remains unique and
+multi-instance callers must use an explicit destination instance when route
+selection would otherwise be ambiguous.
+
+## Service directory
+
+- `BusClient::services()` returns the runtime's current thread-safe snapshot.
+- Registration adds an instance and clean disconnect removes it. CommHub
+  broadcasts both changes with a monotonically increasing directory revision.
+- Heartbeat expiry also removes the stale service and broadcasts that removal.
+- A descriptor contains service name, instance ID, node ID, version, and a
+  `local` flag. Here `local` means the service has the same node ID as the
+  observing client; it does not mean "this client instance".
+- The snapshot is discovery state, not a reservation. A service can disappear
+  after it is listed, so exact routing may still return `ServiceUnavailable`.
+- There is no durable directory or offline Event queue. A fresh registration
+  snapshot reconstructs state after reconnect, but automatic Linux reconnect
+  is not implemented yet.
 
 ## Heartbeat lease
 

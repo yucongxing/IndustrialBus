@@ -32,8 +32,9 @@ semantics; it never executes an algorithm.
 
 Owns the Protobuf wire schemas and generated C++ for Envelope, system control
 messages, operations, logging, DataRef, Layout, and CMP. System control messages
-include service registration, subscription updates, Heartbeat/HeartbeatAck,
-standard errors, and command acknowledgements.
+include singleton/multi-instance service registration, revisioned service
+directory snapshots and add/remove updates, subscription updates,
+Heartbeat/HeartbeatAck, standard errors, and command acknowledgements.
 
 It describes the wire contract only. It does not route, authenticate, send, or
 apply business policy.
@@ -77,7 +78,10 @@ or maintain sessions.
 Owns the `BusClient` implementation and process-local singleton, callback
 executor, pending request deadlines and late replies, subscription reference
 counts, typed request/command handlers, and durable command acceptance through
-the idempotency journal. On Linux it also owns endpoint/token discovery,
+the idempotency journal. `ClientOptions::instance_mode` defaults to
+`SingletonPerUser`; `MultiInstance` permits distinct `instance_id` values for
+the same service name. `BusClient::services()` exposes the runtime's current
+directory snapshot. On Linux Client also owns endpoint/token discovery,
 ConnectOnly/AutoStart selection, and assembly of the ZeroMQ runtime adapter.
 
 It does not select Hub routes, listen on ROUTER, implement a transport backend,
@@ -125,8 +129,10 @@ defined by `runtime/CMakeLists.txt` when ZeroMQ is enabled.
 ## `runtime`
 
 Owns the concrete protocol/transport integration. Client-side
-`TransportRuntimeAdapter` performs registration, subscription control,
-Heartbeat transmission, HeartbeatAck validation, and Hub liveness timeout.
+`TransportRuntimeAdapter` performs registration, maintains the current service
+directory snapshot, applies directory add/remove updates, controls
+subscriptions, transmits Heartbeats, validates HeartbeatAck, and enforces Hub
+liveness timeout.
 Server-side `CommHubServer` authenticates registration, maps peers to sessions,
 validates and acknowledges heartbeats, routes frames, drains outbound queues,
 and periodically expires stale sessions. Runtime also builds the `commhub`
@@ -143,11 +149,14 @@ and the Linux automatic reconnect supervisor remain future work.
 
 ## `examples/simulated_apps`
 
-Owns the first runnable, non-Qt product-shaped example. `layoutview_sim`
-subscribes to CMP progress/final events and submits an idempotent
-`cmp.simulation.run` Command. `cmpsuite_sim` durably accepts that Command,
-executes a short simulated job, persists its terminal journal state, and
-publishes progress and completion events.
+Owns the first runnable, non-Qt product-shaped example. Every `cmpsuite_sim`
+owns a UUID channel, registers as the exact `cmp-suite/<channel>` instance, and
+uses channel-scoped Topics and a separate journal. Multiple channels can be
+online concurrently. `layoutview_sim --list-channels` discovers them, while
+`--channel UUID` binds one LayoutView process to one owner and submits an
+idempotent run Command. `cmpsuite_sim` durably accepts that Command, executes a
+short simulated job, persists its terminal journal state, and publishes
+channel-scoped progress and completion events.
 
 The two executable sources depend only on the STL-facing `simulation_app.h`
 facade and `simple_logger.h`. `simulated_logger` provides a Logger dispatcher,
@@ -168,4 +177,6 @@ DataRef checksum/lifetime management, or production state-directory policy.
 - Detailed flow: `docs/simulated-communication.md`
 - Build option: `INDUSTRIAL_BUS_BUILD_SIMULATED_APPS` (default `ON`, requires
   Protobuf and ZeroMQ)
-- Tests: Logger level/component formatting and Sink fan-out through GoogleTest
+- Tests: Logger level/component formatting, Sink fan-out, UUID validation,
+  channel Topic ownership, exact multi-instance routing, and empty forwarding
+  when an Event has no subscribers, through GoogleTest

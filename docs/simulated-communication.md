@@ -5,8 +5,10 @@ This document describes the current communication path between
 interfaces in `simulation_app.h`; all IndustrialBus and Protobuf details stay
 inside `bus_simulation_adapter.cpp`.
 
-The two processes never connect directly. Commands, acknowledgements, events,
-and bus-backed logs are routed through CommHub.
+The processes never connect directly. Commands, acknowledgements, events,
+service-directory updates, and bus-backed logs are routed through CommHub.
+Every CMPSuite process owns a UUID `channel_id`; that value is both its
+`instance_id` and the namespace used by its Topics.
 
 ## Architecture
 
@@ -28,7 +30,15 @@ flowchart LR
         HUB["Service registry<br/>Topic subscriptions<br/>Return-route table"]
     end
 
-    subgraph CMP_PROCESS["cmpsuite_sim process"]
+    subgraph CMP_A["cmpsuite_sim A"]
+        A["cmp-suite / channel A<br/>Journal A"]
+    end
+
+    subgraph CMP_B["cmpsuite_sim B"]
+        B["cmp-suite / channel B<br/>Journal B"]
+    end
+
+    subgraph CMP_DETAIL["selected CMPSuite process"]
         CMP_MAIN["CMPSuite main"]
         CMP_ADAPTER["BusCmpSuiteService"]
         CMP_JOB["SimulationJob<br/>Worker thread"]
@@ -45,9 +55,11 @@ flowchart LR
     end
 
     LV_ADAPTER <-->|"Command / Ack / Event"| HUB
+    A <-->|"channel A Topics"| HUB
+    B <-->|"channel B Topics"| HUB
     CMP_ADAPTER <-->|"Command / Ack / Event"| HUB
-    LV_BUS_LOG -->|"application.log"| HUB
-    CMP_BUS_LOG -->|"application.log"| HUB
+    LV_BUS_LOG -->|"application.log.<channel>"| HUB
+    CMP_BUS_LOG -->|"application.log.<channel>"| HUB
 ```
 
 The application-facing interfaces are:
@@ -61,15 +73,17 @@ The application-facing interfaces are:
 
 ## Topics and message roles
 
+For channel UUID `<c>`, the owned Topics are:
+
 | Topic | Protobuf payload | Direction | Meaning |
 |---|---|---|---|
-| `cmp.simulation.run` | `RunSimulation` | LayoutView to CMPSuite | Submit a durable, idempotent simulation Command |
-| `cmp.simulation.progress` | `SimulationProgress` | CMPSuite to subscribers | Report non-terminal progress |
-| `cmp.simulation.completed` | `SimulationCompleted` | CMPSuite to subscribers | Report a successful terminal result |
-| `cmp.simulation.failed` | `SimulationFailed` | CMPSuite to subscribers | Report a failed terminal result |
-| `application.log` | `LogEvent` | Either application to subscribers | Publish best-effort diagnostic logs |
+| `cmp.channel.<c>.simulation.run` | `RunSimulation` | LayoutView to exact CMPSuite | Submit a durable, idempotent simulation Command |
+| `cmp.channel.<c>.simulation.progress` | `SimulationProgress` | CMPSuite to channel subscribers | Report non-terminal progress |
+| `cmp.channel.<c>.simulation.completed` | `SimulationCompleted` | CMPSuite to channel subscribers | Report a successful terminal result |
+| `cmp.channel.<c>.simulation.failed` | `SimulationFailed` | CMPSuite to channel subscribers | Report a failed terminal result |
+| `application.log.<c>` | `LogEvent` | Either channel participant to subscribers | Publish best-effort diagnostic logs |
 
-`CommandAck` is the standard reply type for `cmp.simulation.run`. It means the
+`CommandAck` is the standard reply type for the run Topic. It means the
 Command was durably accepted and assigned to an owner. It does **not** mean the
 simulation completed.
 
@@ -85,17 +99,21 @@ sequenceDiagram
     participant CMP as CMPSuite worker
     participant J as Idempotency journal
 
-    CMPB->>J: Open journal
-    CMPB->>HUB: Connect and register cmp-suite
-    CMPB->>CMPB: Register cmp.simulation.run handler
+    CMPB->>J: Open and lock channel journal
+    CMPB->>HUB: Register cmp-suite / channel UUID (MultiInstance)
+    HUB-->>CMPB: RegistrationAck + directory snapshot
+    CMPB->>J: Fail interrupted non-terminal records
+    CMPB->>CMPB: Register channel run handler
 
-    LVB->>HUB: Connect and register layout-view
-    LVB->>HUB: Subscribe Progress / Completed / Failed
+    LVB->>HUB: Register layout-view / random UUID (MultiInstance)
+    HUB-->>LVB: RegistrationAck + directory snapshot
+    LVB->>LVB: Select one discovered CMP channel
+    LVB->>HUB: Subscribe selected channel Progress / Completed / Failed
 
     LV->>LV: Generate operation_id
     LV->>LVB: Submit RunSimulation Command
-    LVB->>HUB: cmp.simulation.run
-    HUB->>HUB: Resolve cmp-suite and save return route
+    LVB->>HUB: cmp.channel.c.simulation.run to cmp-suite/c
+    HUB->>HUB: Resolve exact service instance and save return route
     HUB->>CMPB: Forward RunSimulation
 
     CMPB->>J: Register and deduplicate Command
@@ -109,7 +127,7 @@ sequenceDiagram
         CMP->>CMP: Sleep 150 ms
         CMP->>CMPB: reportProgress()
         CMPB->>HUB: SimulationProgress Event
-        HUB-->>LVB: Broadcast Progress
+        HUB-->>LVB: Forward to current channel subscribers
         LVB-->>LV: Filter by operation_id and log
     end
 
@@ -128,19 +146,26 @@ sequenceDiagram
 
 The bus-backed service performs these operations in order:
 
-1. opens the append-only idempotency journal;
-2. connects to CommHub with service name `cmp-suite`;
-3. attaches an asynchronous `BusLogSink` to the Logger;
-4. registers the `cmp.simulation.run` Command handler;
-5. reports that the service is ready.
+1. uses `--channel UUID`, or generates a UUID and prints it;
+2. opens and exclusively locks the channel's append-only journal;
+3. registers `cmp-suite/<channel>` in `MultiInstance` mode;
+4. marks journal records left non-terminal by a previous process as
+   `Failed/OwnerUnavailable`;
+5. attaches an asynchronous channel `BusLogSink` to the Logger;
+6. registers the channel-specific run Command handler;
+7. reports the channel and journal path as ready.
 
 The journal is supplied to `BusClient`, so Command acceptance and duplicate
 detection happen before the application callback starts.
 
 ## 2. LayoutView startup and subscriptions
 
-`layoutview_sim` creates a Logger and `LayoutViewClient`, then connects with
-service name `layout-view`.
+`layoutview_sim --list-channels` registers as a unique `layout-view` instance,
+reads the registration snapshot maintained by the runtime, filters live
+`cmp-suite` instances whose instance ID is a UUID, sorts them, and exits.
+
+`layoutview_sim --channel UUID` fixes that process to exactly one channel. It
+does not fall back to another CMPSuite if the selected owner is unavailable.
 
 For each `runSimulation()` call, LayoutView installs subscriptions for Progress,
 Completed, and Failed **before** sending the Command. This ordering prevents a
@@ -148,8 +173,8 @@ fast CMPSuite operation from publishing a final event before LayoutView is
 ready to receive it.
 
 The three subscription handles remain alive until `runSimulation()` returns.
-Each callback checks `operation_id`, because the Topics are shared by every
-concurrent simulation.
+Each callback also checks `operation_id`, because multiple operations may still
+share one channel Topic.
 
 ## 3. Command construction
 
@@ -163,8 +188,9 @@ payload containing:
 The accompanying Command options are:
 
 ```text
-destination_service = cmp-suite
-topic               = cmp.simulation.run
+destination_service  = cmp-suite
+destination_instance = <channel UUID>
+topic                = cmp.channel.<channel UUID>.simulation.run
 operation_id        = generated UUID
 idempotency_key     = layout-view-<operation_id>
 accept_timeout      = 5 seconds
@@ -183,7 +209,7 @@ CommHub does not parse or execute CMP business data. It:
 
 1. validates the authenticated LayoutView session;
 2. rejects missing or expired Command deadlines;
-3. resolves the registered `cmp-suite` service instance;
+3. resolves exactly `cmp-suite/<channel>`; it never chooses another instance;
 4. stores a return route keyed by the Command message ID;
 5. forwards the Envelope to that instance.
 
@@ -202,7 +228,7 @@ source_service + topic + idempotency_key
 For this demo it is normally:
 
 ```text
-layout-view + cmp.simulation.run + layout-view-<operation_id>
+layout-view + cmp.channel.<channel>.simulation.run + layout-view-<operation_id>
 ```
 
 ```mermaid
@@ -245,8 +271,9 @@ five; every step sleeps for 150 ms and calls `reportProgress()`.
 - `current / total` as a value between zero and one;
 - a human-readable step message.
 
-CommHub broadcasts the Event to current subscribers of
-`cmp.simulation.progress`. LayoutView ignores events belonging to other
+CommHub forwards the Event only to current subscribers of the channel-specific
+progress Topic. If there are no subscribers, the target set is empty and the
+Event is not retained. LayoutView ignores events belonging to other
 operation IDs and prints matching progress through its Logger.
 
 Progress is best effort: it is not written to the idempotency journal and is
@@ -261,7 +288,7 @@ On success, CMPSuite:
 
 1. persists `Completed` in the journal;
 2. builds a `SimulationCompleted` Event containing a result `DataRef`;
-3. publishes the Event to `cmp.simulation.completed`.
+3. publishes the Event to the channel's completed Topic.
 
 LayoutView's Completed callback stores the result URI, sets the shared outcome
 to successful, and wakes the thread waiting on a condition variable.
@@ -286,7 +313,7 @@ flowchart LR
     LOGGER --> QUEUE["BusLogSink<br/>bounded queue: 256"]
     QUEUE --> LOG_EVENT["logging.v1.LogEvent"]
     LOG_EVENT --> HUB["CommHub"]
-    HUB --> COLLECTOR["application.log subscribers<br/>not implemented by this demo"]
+    HUB --> COLLECTOR["application.log.&lt;channel&gt; subscribers<br/>not implemented by this demo"]
 ```
 
 The BusLogSink:
@@ -299,13 +326,54 @@ The BusLogSink:
 - never reports a bus-log failure through the same Logger, preventing recursion.
 
 The current implementation publishes `LogEvent` on the ordinary Event Topic
-`application.log`. With no LogCollector subscriber, ConsoleSink output remains
-visible but the bus log is not persisted.
+`application.log.<channel>`. With no LogCollector subscriber, ConsoleSink
+output remains visible but the bus log is neither forwarded nor persisted.
 
-## 9. Shutdown and `--once`
+## 9. Opening CMPSuite more than once
+
+Two launches without `--channel` generate different UUIDs and journals, so
+both are valid online instances:
+
+```mermaid
+flowchart TD
+    START_A["cmpsuite_sim A"] --> UUID_A["generate channel A"]
+    START_B["cmpsuite_sim B"] --> UUID_B["generate channel B"]
+    UUID_A --> REG_A["register cmp-suite / A"]
+    UUID_B --> REG_B["register cmp-suite / B"]
+    REG_A --> DIR["CommHub service directory"]
+    REG_B --> DIR
+    DIR --> LIST["LayoutView --list-channels<br/>A<br/>B"]
+    LIST --> BIND["LayoutView --channel B"]
+    BIND --> EXACT["Destination = cmp-suite / B<br/>Topics = cmp.channel.B.*"]
+```
+
+The same logical channel may have only one live owner:
+
+- same channel plus the default journal: the second process normally fails the
+  journal's exclusive file lock;
+- same channel plus two different custom journals: the files do not conflict,
+  but CommHub rejects the duplicate service/instance registration;
+- different channels plus the same custom journal: unsupported, because one
+  journal must not mix channel histories;
+- restart after the old owner exits: reuse both its channel and journal. The
+  startup recovery keeps terminal records and durably fails Created, Running,
+  or Cancelling records with `OwnerUnavailable`.
+
+Recovery updates local durable state only. Commands are not replayed, and the
+demo does not publish offline failure Events for recovered operations. A
+LayoutView that was waiting during a crash therefore times out; a production
+version needs an operation-status query to retrieve the recovered terminal
+state.
+
+Service-directory removal is propagated on clean disconnect and after an
+expired heartbeat lease. Because automatic client reconnection is not yet
+implemented, a process that loses CommHub must be restarted.
+
+## 10. Shutdown and `--once`
 
 Without `--once`, CMPSuite waits until SIGINT or SIGTERM. With `--once`, the
-main loop exits after the first worker finishes its handler.
+main loop exits after the first worker finishes its handler. It does not mean
+"run one process" or "allow one channel"; it is only a demo lifecycle switch.
 
 Shutdown proceeds in this order:
 

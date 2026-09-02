@@ -3,11 +3,12 @@
 This is the smallest runnable product-shaped IndustrialBus flow. It is pure
 C++17 and does not depend on Qt.
 
-`layoutview_sim` connects as `layout-view`, installs progress/completion
-subscriptions, and submits an idempotent `cmp.simulation.run` Command to
-`cmp-suite`. `cmpsuite_sim` uses the durable command journal, acknowledges the
-accepted operation, publishes five progress events, persists Completed, and
-publishes the final result DataRef.
+Each `cmpsuite_sim` owns a UUID channel, registers that UUID as its service
+instance, and uses a channel-specific durable journal. `layoutview_sim` first
+discovers online channels and then binds to exactly one of them. It installs
+channel-specific progress/completion subscriptions and submits an idempotent
+Command to that exact `cmp-suite/<channel>` instance. Several CMPSuite
+processes can therefore run concurrently without sharing Commands or Events.
 
 For a message-by-message explanation with architecture and sequence diagrams,
 see [LayoutView and CMPSuite communication](simulated-communication.md).
@@ -47,8 +48,12 @@ The examples are built by default. Set
 
 Both processes must use the same `XDG_RUNTIME_DIR`. The first process starts
 CommHub automatically using the build-tree `commhub` path embedded by CMake.
+IndustrialBus uses that standard per-user directory for its Unix IPC socket,
+endpoint record, token, and startup lock. Applications normally inherit the
+desktop/session value and do not need to set it. The `/tmp` value below is only
+a self-contained demo fallback and must be private mode `0700`.
 
-Terminal 1:
+Terminal 1 (the generated channel is printed before startup):
 
 ```sh
 export XDG_RUNTIME_DIR="/tmp/industrial-bus-demo-$UID"
@@ -56,11 +61,27 @@ mkdir -p -m 700 "$XDG_RUNTIME_DIR"
 ./build/examples/simulated_apps/cmpsuite_sim --once
 ```
 
-Terminal 2:
+Alternatively, assign a stable channel explicitly. Reuse the same UUID and
+journal path after a restart when the new process must represent the same
+logical CMPSuite channel:
+
+```sh
+CHANNEL=11111111-1111-4111-8111-111111111111
+./build/examples/simulated_apps/cmpsuite_sim --once --channel "$CHANNEL"
+```
+
+Terminal 2 first lists the live channels:
 
 ```sh
 export XDG_RUNTIME_DIR="/tmp/industrial-bus-demo-$UID"
-./build/examples/simulated_apps/layoutview_sim --timeout 15
+./build/examples/simulated_apps/layoutview_sim --list-channels
+```
+
+Then bind this LayoutView process to one channel:
+
+```sh
+./build/examples/simulated_apps/layoutview_sim \
+  --channel 11111111-1111-4111-8111-111111111111 --timeout 15
 ```
 
 Expected flow:
@@ -75,7 +96,15 @@ LayoutView: completed, result=file:///tmp/cmp-result-....oas
 ```
 
 The default CMPSuite journal is
-`/tmp/industrial-bus-cmpsuite-$UID.journal`; override it with `--journal`.
+`/tmp/industrial-bus-cmpsuite-$UID-<channel>.journal`; override it with
+`--journal`. A custom journal belongs to one logical channel and must not be
+reused with another channel ID. On startup, non-terminal records left by an
+interrupted process are durably changed to `Failed/OwnerUnavailable`; terminal
+records are preserved. Recovery does not replay Commands or offline Events.
+
+Starting another CMPSuite with the same channel is rejected. With the default
+journal it normally fails first on the journal file lock; with separate custom
+journals CommHub rejects the duplicate `cmp-suite/<channel>` registration.
 Both programs accept `--hub PATH` when a different CommHub executable is
 needed.
 
@@ -85,4 +114,8 @@ needed.
 - Checksums, TTL/release handling, cancellation, and failure injection are not
   implemented yet.
 - Progress runs on a worker thread and is not adapted to a Qt event loop.
+- Service discovery is an instantaneous local snapshot; `--list-channels`
+  does not wait for a future CMPSuite to appear.
+- Events and bus logs are best effort. If a channel Topic has no current
+  subscriber, CommHub has no forwarding target and does not retain the Event.
 - CommHub remains a per-user background process after the two programs exit.

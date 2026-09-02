@@ -636,7 +636,7 @@ layout.boolean.started
 layout.boolean.progress
 layout.boolean.completed
 layout.boolean.failed
-cmp.simulation.run
+cmp.channel.<channel_uuid>.simulation.run
 system.service.connected
 system.service.disconnected
 log.layout-boolean.error
@@ -677,7 +677,7 @@ Command 表示要求目标服务执行动作：
 layout.boolean.execute
 layout.boolean.cancel
 layout.view.highlight
-cmp.simulation.run
+cmp.channel.<channel_uuid>.simulation.run
 ```
 
 要求：
@@ -1130,10 +1130,11 @@ enum InstanceMode {
 }
 ```
 
-- `service_name` 是稳定逻辑服务名，`instance_id` 每次进程启动重新生成；
-- LayoutView、LayoutBoolean、CMPSuite 首版均注册为 `SINGLETON_PER_USER`；
+- `service_name` 是稳定逻辑服务名；临时实例的 `instance_id` 每次进程启动重新生成，代表可恢复逻辑频道时则复用频道 UUID；
+- `ClientOptions` 默认 `SINGLETON_PER_USER`，兼容单实例服务；
+- 多个 CMPSuite 使用 `MULTI_INSTANCE`，每个实例以 `channel_id` 作为 `instance_id`；一个 LayoutView 进程显式绑定一个频道；
 - Singleton 重复注册时，新实例失败并返回 `SERVICE_ALREADY_REGISTERED`，不得随机替换旧实例；
-- `MULTI_INSTANCE` 为未来能力，调用方必须显式提供选择策略。
+- `MULTI_INSTANCE` 已支持在线目录快照及 add/remove 更新；目标存在歧义时调用方必须指定实例，本示例统一使用 Exact。
 
 ### 19.3 MessageRouter
 
@@ -1141,7 +1142,7 @@ enum InstanceMode {
 
 1. 指定 `destination_instance`：精确路由；
 2. 未指定实例且 Singleton 只有一个实例：直接路由；
-3. `MULTI_INSTANCE` 必须显式使用 `Exact` 或 `PreferLocal`，首版不实现 RoundRobin、LeastLoaded；
+3. `MULTI_INSTANCE` 必须显式使用 `Exact` 或无歧义的 `PreferLocal`，首版不实现 RoundRobin、LeastLoaded；
 4. Event：按 Topic 订阅集合广播，不使用服务实例选择策略；
 5. 无有效路由时返回 `SERVICE_UNAVAILABLE`。
 
@@ -1719,9 +1720,12 @@ target_link_libraries(layout_boolean
 
 Catalog 以 `(topic, message_type, payload_role)` 绑定 Protobuf 完整类型名和 schema major。CommandTopic 与 RequestTopic 分别声明输入和成功输出，标准 Error 单独登记，Hub 只校验元数据而不解析业务 payload。
 
-### ADR-015：首版服务为每 UID 单实例
+### ADR-015：默认单实例，显式频道允许多实例
 
-LayoutView、LayoutBoolean、CMPSuite 首版均注册为 `SINGLETON_PER_USER`。重复注册明确失败；Operation 接受后绑定 owner instance，不做隐式负载均衡和实例迁移。
+`ClientOptions` 默认 `SINGLETON_PER_USER`。需要并存的 CMPSuite 显式注册为
+`MULTI_INSTANCE`，以频道 UUID 作为稳定 `instance_id`；同一频道仍只允许一个在线
+owner。LayoutView 先从服务目录发现频道，再通过 `destination_instance` 精确绑定。
+Operation 接受后不做隐式负载均衡和实例迁移。
 
 ### ADR-016：幂等确认先于业务执行
 
@@ -1771,13 +1775,18 @@ sequenceDiagram
 ### 32.1 首个可运行最小实现
 
 仓库中的 `examples/simulated_apps` 提供纯 C++17、无 Qt 的
-`layoutview_sim` 和 `cmpsuite_sim`。前者向 `cmp-suite` 发送带
-`operation_id` 与 `idempotency_key` 的 `cmp.simulation.run` Command，并订阅
-Progress/Completed/Failed Event；后者通过私有 append-only journal 持久化接受，
-在工作线程模拟五个计算阶段，先持久化 Completed，再发布最终 DataRef Event。
+`layoutview_sim` 和 `cmpsuite_sim`。每个 CMPSuite 生成或接收一个频道 UUID，以
+`cmp-suite/<channel>` 多实例身份注册，并使用独立 journal 和
+`cmp.channel.<channel>.simulation.*` Topics。LayoutView 可通过 `--list-channels`
+发现在线频道，再以 `--channel UUID` 固定绑定一个 owner；命令同时使用精确
+`destination_instance` 和频道 Topic，避免不同实例串台。后者通过私有 append-only
+journal 持久化接受，在工作线程模拟五个计算阶段，先持久化 Completed，再发布最终
+DataRef Event。
 
 该示例用于验证 CommHub 自动启动、服务注册、强类型 Protobuf 消息、CommandAck、
-幂等接受和 Event 路由的最小闭环。示例 DataRef URI 不创建真实 OASIS 文件，也暂不
+幂等接受、服务发现、多实例精确路由和 Event 隔离的最小闭环。进程重启时复用同一
+频道和 journal，遗留非终态记录持久化为 `Failed/OwnerUnavailable`，但不重放命令。
+示例 DataRef URI 不创建真实 OASIS 文件，也暂不
 实现 checksum、TTL/release、取消和 Qt 5.13 UI 线程投递；这些仍属于后续产品接入。
 
 示例应用入口不直接依赖 IndustrialBus 或 Protobuf。`simple_logger.h` 提供 Logger
