@@ -572,9 +572,13 @@ public:
                 const auto existing = records.find(update.identity);
                 if (existing != records.end() &&
                     existing->second.operation_id == update.operation_id) {
+                    const bool interrupted_failure =
+                        !isTerminal(existing->second.state) &&
+                        update.state == OperationState::Failed;
                     if (update.updated_at_unix_ns < existing->second.updated_at_unix_ns ||
                         (update.state != existing->second.state &&
-                         !isValidTransition(existing->second.state, update.state))) {
+                         !isValidTransition(existing->second.state, update.state) &&
+                         !interrupted_failure)) {
                         return Error::protocol(
                             "idempotency journal contains an invalid state transition");
                     }
@@ -801,6 +805,76 @@ Result<bool> IdempotencyJournal::claimForExecution(
     existing->second.updated_at_unix_ns = update.updated_at_unix_ns;
     existing->second.error.reset();
     return true;
+}
+
+Result<std::size_t> IdempotencyJournal::failNonTerminal(Error error) {
+    if (!error) {
+        return Error::invalidArgument(
+            "a concrete Error is required to fail non-terminal records");
+    }
+
+    const auto now = unixNowNs();
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->purgeExpired(now);
+
+    std::vector<StateUpdateRecord> updates;
+    std::vector<ByteBuffer> serialized_updates;
+    updates.reserve(impl_->records.size());
+    serialized_updates.reserve(impl_->records.size());
+    for (const auto& item : impl_->records) {
+        const auto& record = item.second;
+        if (isTerminal(record.state)) {
+            continue;
+        }
+
+        StateUpdateRecord update;
+        update.identity = record.identity;
+        update.operation_id = record.operation_id;
+        update.state = OperationState::Failed;
+        update.updated_at_unix_ns = std::max(now, record.updated_at_unix_ns);
+        update.error = error;
+        update.error->operation_id = record.operation_id;
+
+        auto serialized = serializeStateUpdate(update);
+        if (serialized.size() - kHeaderSize > kMaxRecordSize) {
+            return Error::resourceExhausted(
+                "idempotency recovery state record is too large");
+        }
+        updates.push_back(std::move(update));
+        serialized_updates.push_back(std::move(serialized));
+    }
+
+    if (updates.empty()) {
+        return std::size_t{0};
+    }
+
+    const auto original_end = impl_->file_end;
+    auto write_offset = original_end;
+    for (const auto& serialized : serialized_updates) {
+        auto written = pwriteExact(impl_->fd, serialized, write_offset);
+        if (!written) {
+            (void)::ftruncate(impl_->fd, original_end);
+            (void)::fdatasync(impl_->fd);
+            return written.error();
+        }
+        write_offset += static_cast<off_t>(serialized.size());
+    }
+    if (::fdatasync(impl_->fd) != 0) {
+        const auto write_error =
+            ioError("failed to sync interrupted idempotency state updates");
+        (void)::ftruncate(impl_->fd, original_end);
+        (void)::fdatasync(impl_->fd);
+        return write_error;
+    }
+
+    impl_->file_end = write_offset;
+    for (auto& update : updates) {
+        auto existing = impl_->records.find(update.identity);
+        existing->second.state = update.state;
+        existing->second.updated_at_unix_ns = update.updated_at_unix_ns;
+        existing->second.error = std::move(update.error);
+    }
+    return updates.size();
 }
 
 Result<IdempotencyRecord> IdempotencyJournal::find(

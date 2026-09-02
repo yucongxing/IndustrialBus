@@ -316,4 +316,109 @@ TEST(IdempotencyJournalTest, PersistsDeduplicatesAndRecoversCommands) {
     EXPECT_EQ(recovered_info.st_size, complete_info.st_size);
 }
 
+TEST(IdempotencyJournalTest, PersistentlyFailsInterruptedNonTerminalRecords) {
+    JournalTempDirectory temp;
+    bus_core::IdempotencyJournalOptions options;
+    options.path = temp.journalPath();
+    options.max_live_records = 8;
+
+    auto opened = bus_core::IdempotencyJournal::open(options);
+    ASSERT_TRUE(opened);
+    auto journal = std::move(opened.value());
+
+    const auto register_operation = [&](std::string key, std::string operation_id) {
+        bus_core::CommandRegistration registration;
+        registration.identity = {"caller", "cmp.simulation.run", std::move(key)};
+        registration.payload = {'c', 'm', 'p'};
+        registration.operation_id = std::move(operation_id);
+        registration.owner_service = "cmp-suite";
+        registration.owner_instance = "channel-a";
+        return journal->registerCommand(std::move(registration));
+    };
+
+    auto created = register_operation("created", "operation-created");
+    auto running = register_operation("running", "operation-running");
+    auto cancelling = register_operation("cancelling", "operation-cancelling");
+    auto completed = register_operation("completed", "operation-completed");
+    auto failed = register_operation("failed", "operation-failed");
+    ASSERT_TRUE(created);
+    ASSERT_TRUE(running);
+    ASSERT_TRUE(cancelling);
+    ASSERT_TRUE(completed);
+    ASSERT_TRUE(failed);
+
+    ASSERT_TRUE(journal->claimForExecution(running.value().record.identity,
+                                           "operation-running"));
+    ASSERT_TRUE(journal->claimForExecution(cancelling.value().record.identity,
+                                           "operation-cancelling"));
+    ASSERT_TRUE(journal->updateState(cancelling.value().record.identity,
+                                     "operation-cancelling",
+                                     OperationState::Cancelling));
+    ASSERT_TRUE(journal->claimForExecution(completed.value().record.identity,
+                                           "operation-completed"));
+    ASSERT_TRUE(journal->updateState(completed.value().record.identity,
+                                     "operation-completed",
+                                     OperationState::Completed));
+    ASSERT_TRUE(journal->claimForExecution(failed.value().record.identity,
+                                           "operation-failed"));
+    auto existing_failure = industrial_bus::Error::internal("algorithm failed", 51);
+    existing_failure.operation_id = "operation-failed";
+    ASSERT_TRUE(journal->updateState(failed.value().record.identity,
+                                     "operation-failed", OperationState::Failed,
+                                     existing_failure));
+
+    journal.reset();
+    opened = bus_core::IdempotencyJournal::open(options);
+    ASSERT_TRUE(opened);
+    journal = std::move(opened.value());
+
+    auto interruption =
+        industrial_bus::Error::ownerUnavailable("CMPSuite process interrupted", 73);
+    interruption.operation_id = "must-be-replaced";
+    interruption.context["recovery"] = "startup";
+    auto recovered = journal->failNonTerminal(interruption);
+    ASSERT_TRUE(recovered);
+    EXPECT_EQ(recovered.value(), 3U);
+
+    for (const auto* decision : {&created.value(), &running.value(),
+                                 &cancelling.value()}) {
+        auto record = journal->find(decision->record.identity);
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record.value().state, OperationState::Failed);
+        ASSERT_TRUE(record.value().error);
+        EXPECT_EQ(record.value().error->category,
+                  industrial_bus::ErrorCategory::OwnerUnavailable);
+        EXPECT_EQ(record.value().error->operation_id,
+                  decision->record.operation_id);
+        EXPECT_EQ(record.value().error->context.at("recovery"), "startup");
+    }
+
+    auto completed_record = journal->find(completed.value().record.identity);
+    ASSERT_TRUE(completed_record);
+    EXPECT_EQ(completed_record.value().state, OperationState::Completed);
+    EXPECT_FALSE(completed_record.value().error);
+    auto failed_record = journal->find(failed.value().record.identity);
+    ASSERT_TRUE(failed_record);
+    EXPECT_EQ(failed_record.value().state, OperationState::Failed);
+    EXPECT_EQ(failed_record.value().error, existing_failure);
+
+    auto idempotent = journal->failNonTerminal(interruption);
+    ASSERT_TRUE(idempotent);
+    EXPECT_EQ(idempotent.value(), 0U);
+
+    journal.reset();
+    opened = bus_core::IdempotencyJournal::open(options);
+    ASSERT_TRUE(opened);
+    journal = std::move(opened.value());
+    for (const auto* decision : {&created.value(), &running.value(),
+                                 &cancelling.value()}) {
+        auto record = journal->find(decision->record.identity);
+        ASSERT_TRUE(record);
+        EXPECT_EQ(record.value().state, OperationState::Failed);
+        ASSERT_TRUE(record.value().error);
+        EXPECT_EQ(record.value().error->operation_id,
+                  decision->record.operation_id);
+    }
+}
+
 }  // namespace

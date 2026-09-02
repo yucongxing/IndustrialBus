@@ -72,6 +72,11 @@ public:
                                           const std::string& operation_id,
                                           OperationState next,
                                           std::optional<Error> error = {});
+    // Persists FAILED updates for every live non-terminal record. The supplied
+    // Error is copied to each record and its operation_id is replaced with the
+    // owning record's operation id. A successful result means all updates have
+    // completed fdatasync(); terminal records are left unchanged.
+    Result<std::size_t> failNonTerminal(Error error);
     Result<IdempotencyRecord> find(const CommandIdentity& identity) const;
     std::size_t liveRecordCount() const;
 
