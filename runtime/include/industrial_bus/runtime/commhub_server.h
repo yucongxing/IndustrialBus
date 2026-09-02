@@ -44,6 +44,11 @@ private:
                                     const transport::ByteBuffer& frame);
     Result<void> handleHeartbeat(const std::shared_ptr<Peer>& peer,
                                  const transport::ByteBuffer& frame);
+    Result<void> disconnectPeer(const std::shared_ptr<Peer>& peer,
+                                const transport::ByteBuffer& frame);
+    void broadcastDirectoryChange(
+        const commhub::ServiceRegistration& service, bool added,
+        const std::shared_ptr<Peer>& excluded = {});
     void maintenanceLoop();
     void expireStaleSessions();
     void drain(const std::vector<commhub::SessionId>& targets);
@@ -65,6 +70,7 @@ private:
     std::unordered_map<commhub::SessionId, std::shared_ptr<Peer>> sessions_;
     bool started_{false};
     bool maintenance_stop_{false};
+    std::uint64_t directory_revision_{0};
 };
 
 }  // namespace industrial_bus::runtime

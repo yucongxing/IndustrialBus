@@ -61,6 +61,27 @@ message ServiceRegistration {
 message ServiceRegistrationAck {
   string hub_instance_id = 1;
   uint32 negotiated_protocol_version = 2;
+  uint64 directory_revision = 3;
+  repeated ServiceDescriptor services = 4;
+}
+
+message ServiceDescriptor {
+  string node_id = 1;
+  string service_name = 2;
+  string instance_id = 3;
+  string version = 4;
+}
+
+message ServiceDirectoryUpdate {
+  enum ChangeType {
+    CHANGE_TYPE_UNSPECIFIED = 0;
+    ADDED = 1;
+    REMOVED = 2;
+  }
+
+  uint64 revision = 1;
+  ChangeType change_type = 2;
+  ServiceDescriptor service = 3;
 }
 
 message SubscriptionUpdate {

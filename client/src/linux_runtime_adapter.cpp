@@ -199,7 +199,13 @@ public:
     }
 
     ServiceInfo localService() const override {
-        return {options_.service_name, instance_id_, true};
+        ServiceInfo service;
+        service.service_name = options_.service_name;
+        service.instance_id = instance_id_;
+        service.node_id = options_.node_id;
+        service.version = options_.service_version;
+        service.local = true;
+        return service;
     }
 
     bool flush(std::chrono::milliseconds timeout) override {
@@ -254,6 +260,7 @@ private:
         runtime_options.service_name = options_.service_name;
         runtime_options.instance_id = instance_id_;
         runtime_options.service_version = options_.service_version;
+        runtime_options.instance_mode = options_.instance_mode;
         runtime_options.auth_token = std::move(token);
         runtime_options.expected_hub_instance_id = endpoint.hub_instance_id;
         runtime_options.expected_protocol_version = endpoint.protocol_version;

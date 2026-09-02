@@ -29,11 +29,17 @@ enum class ConnectionState {
     ShuttingDown,
 };
 
+enum class InstanceMode {
+    SingletonPerUser,
+    MultiInstance,
+};
+
 struct ClientOptions {
     std::string service_name;
     std::string instance_id;
     std::string node_id{"local"};
     std::string service_version{"0.1.0"};
+    InstanceMode instance_mode{InstanceMode::SingletonPerUser};
     HubStartupMode startup_mode{HubStartupMode::AutoStart};
     Duration startup_timeout{std::chrono::seconds(5)};
     Duration heartbeat_interval{std::chrono::seconds(2)};
@@ -49,7 +55,9 @@ struct ClientOptions {
 struct ServiceInfo {
     std::string service_name;
     std::string instance_id;
-    bool local{true};
+    std::string node_id;
+    std::string version;
+    bool local{false};
 };
 
 using ServiceSnapshot = std::vector<ServiceInfo>;

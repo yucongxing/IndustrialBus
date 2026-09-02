@@ -19,6 +19,7 @@ public:
     std::optional<ServiceInstance> exact(const std::string& service_name,
                                          const std::string& instance_id) const;
     std::vector<ServiceInstance> instances(const std::string& service_name) const;
+    std::vector<ServiceInstance> allInstances() const;
     std::optional<ServiceInstance> resolve(const std::string& service_name,
                                            const std::string& instance_id,
                                            SelectionPolicy policy,

@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -134,6 +135,12 @@ TEST(RuntimeHeartbeatTest, KeepsLiveSessionAndExpiresQuietSession) {
         "live-service", "live-service-instance"));
     EXPECT_FALSE(server.core().services().exact(
         "quiet-service", "quiet-service-instance"));
+    const auto discovered = live.services();
+    EXPECT_TRUE(std::none_of(discovered.begin(), discovered.end(),
+                             [](const auto& service) {
+                                 return service.instance_id ==
+                                        "quiet-service-instance";
+                             }));
     EXPECT_EQ(live.state(), ConnectionState::Connected);
 
     quiet.close();

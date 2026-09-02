@@ -8,6 +8,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -36,6 +37,14 @@ client::OutboundMessage eventMessage(std::string topic, std::string body) {
     message.payload_type = "test.StringEvent";
     message.payload.assign(body.begin(), body.end());
     return message;
+}
+
+bool hasService(const ServiceSnapshot& services,
+                const std::string& name,
+                const std::string& instance) {
+    return std::any_of(services.begin(), services.end(), [&](const auto& service) {
+        return service.service_name == name && service.instance_id == instance;
+    });
 }
 
 TEST(EnvelopeCodecTest, PreservesStructuredError) {
@@ -230,6 +239,50 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
     hub.stop();
     EXPECT_TRUE(::unlink(journal_path.c_str()) == 0);
     EXPECT_TRUE(::rmdir(journal_directory) == 0);
+}
+
+TEST(RuntimeE2eTest, DiscoversMultipleInstancesAndRemovesClosedServices) {
+    auto loopback = std::make_shared<transport::LoopbackHub>();
+    const transport::Endpoint endpoint{"loopback://runtime-directory"};
+    runtime::CommHubServer hub(loopback, endpoint, "hub-directory", "token");
+    ASSERT_TRUE(hub.start());
+
+    auto make_options = [&](std::string service, std::string instance) {
+        runtime::TransportRuntimeOptions options;
+        options.endpoint = endpoint;
+        options.connector = loopback;
+        options.service_name = std::move(service);
+        options.instance_id = std::move(instance);
+        options.auth_token = "token";
+        options.expected_hub_instance_id = "hub-directory";
+        options.instance_mode = InstanceMode::MultiInstance;
+        return options;
+    };
+
+    runtime::TransportRuntimeAdapter observer(
+        make_options("layout-view", "layout-instance"));
+    runtime::TransportRuntimeAdapter first(
+        make_options("cmp-suite", "channel-a"));
+    runtime::TransportRuntimeAdapter second(
+        make_options("cmp-suite", "channel-b"));
+
+    ASSERT_TRUE(observer.start());
+    ASSERT_TRUE(first.start());
+    ASSERT_TRUE(second.start());
+    EXPECT_TRUE(hasService(second.services(), "layout-view", "layout-instance"));
+    EXPECT_TRUE(hasService(second.services(), "cmp-suite", "channel-a"));
+    EXPECT_TRUE(hasService(second.services(), "cmp-suite", "channel-b"));
+    EXPECT_TRUE(hasService(observer.services(), "cmp-suite", "channel-a"));
+    EXPECT_TRUE(hasService(observer.services(), "cmp-suite", "channel-b"));
+
+    first.close();
+    EXPECT_FALSE(hasService(observer.services(), "cmp-suite", "channel-a"));
+    EXPECT_TRUE(hasService(observer.services(), "cmp-suite", "channel-b"));
+
+    second.close();
+    EXPECT_FALSE(hasService(observer.services(), "cmp-suite", "channel-b"));
+    observer.close();
+    hub.stop();
 }
 
 }  // namespace

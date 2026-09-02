@@ -80,9 +80,23 @@ public:
     }
     ConnectionState state() const override { return current_state; }
     std::uint64_t generation() const override { return current_generation; }
-    ServiceSnapshot services() const override { return {{"worker", "instance-1", true}}; }
+    ServiceSnapshot services() const override {
+        ServiceInfo service;
+        service.service_name = "worker";
+        service.instance_id = "instance-1";
+        service.node_id = "local";
+        service.version = "0.1.0";
+        service.local = true;
+        return {service};
+    }
     ServiceInfo localService() const override {
-        return {"test-client", "test-instance", true};
+        ServiceInfo service;
+        service.service_name = "test-client";
+        service.instance_id = "test-instance";
+        service.node_id = "local";
+        service.version = "0.1.0";
+        service.local = true;
+        return service;
     }
     bool flush(std::chrono::milliseconds) override { return true; }
     void close() noexcept override { current_state = ConnectionState::Disconnected; }

@@ -74,6 +74,21 @@ std::vector<ServiceInstance> ServiceRegistry::instances(const std::string& servi
     return found == services_.end() ? std::vector<ServiceInstance>{} : found->second;
 }
 
+std::vector<ServiceInstance> ServiceRegistry::allInstances() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::vector<ServiceInstance> result;
+    for (const auto& service : services_) {
+        result.insert(result.end(), service.second.begin(), service.second.end());
+    }
+    std::sort(result.begin(), result.end(), [](const auto& left, const auto& right) {
+        if (left.registration.service_name != right.registration.service_name) {
+            return left.registration.service_name < right.registration.service_name;
+        }
+        return left.registration.instance_id < right.registration.instance_id;
+    });
+    return result;
+}
+
 std::optional<ServiceInstance> ServiceRegistry::resolve(const std::string& service_name,
                                                         const std::string& instance_id,
                                                         SelectionPolicy policy,

@@ -22,6 +22,7 @@ struct TransportRuntimeOptions {
     std::string service_name;
     std::string instance_id;
     std::string service_version{"0.1.0"};
+    InstanceMode instance_mode{InstanceMode::SingletonPerUser};
     std::string auth_token;
     std::string expected_hub_instance_id;
     std::uint32_t expected_protocol_version{1};
@@ -50,6 +51,8 @@ public:
 
 private:
     Result<void> sendRegistration();
+    void sendDeregistration(
+        const std::shared_ptr<transport::IConnection>& connection) noexcept;
     Result<void> sendSubscription(const std::string& topic, bool subscribe_value);
     Result<void> sendHeartbeat(const std::shared_ptr<transport::IConnection>& connection,
                                const std::string& message_id,
@@ -72,6 +75,8 @@ private:
     bool registered_{false};
     std::string registration_message_id_;
     std::optional<Error> registration_error_;
+    ServiceSnapshot services_;
+    std::uint64_t directory_revision_{0};
     std::chrono::steady_clock::time_point last_hub_activity_{};
     std::uint64_t next_heartbeat_sequence_{1};
     std::unordered_map<std::string, std::uint64_t> pending_heartbeats_;

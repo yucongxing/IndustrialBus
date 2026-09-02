@@ -54,6 +54,38 @@ transport::ByteBuffer serializeReply(const envelope::MessageEnvelope& request,
     return transport::ByteBuffer(bytes.begin(), bytes.end());
 }
 
+transport::ByteBuffer serializeSystemMessage(
+    const std::string& topic, const std::string& payload_type,
+    const google::protobuf::MessageLite& payload,
+    const std::string& hub_instance_id) {
+    envelope::MessageEnvelope message;
+    message.set_message_id(generateUuidV4());
+    message.set_correlation_id(generateUuidV4());
+    message.set_source_node("local");
+    message.set_source_service("commhub");
+    message.set_source_instance(hub_instance_id);
+    message.set_topic(topic);
+    message.set_message_type(envelope::SYSTEM);
+    message.set_payload_role(envelope::SYSTEM_PAYLOAD);
+    message.set_payload_type(payload_type);
+    message.set_timestamp_unix_ns(unixNowNs());
+    message.set_protocol_version(1);
+    message.set_schema_version(1);
+    message.set_max_hops(1);
+    payload.SerializeToString(message.mutable_payload());
+    std::string bytes;
+    message.SerializeToString(&bytes);
+    return transport::ByteBuffer(bytes.begin(), bytes.end());
+}
+
+void setDescriptor(system_proto::ServiceDescriptor* descriptor,
+                   const commhub::ServiceRegistration& service) {
+    descriptor->set_node_id(service.node_id);
+    descriptor->set_service_name(service.service_name);
+    descriptor->set_instance_id(service.instance_id);
+    descriptor->set_version(service.version);
+}
+
 system_proto::ErrorCategory errorCategory(commhub::HubErrorCode code) {
     switch (code) {
         case commhub::HubErrorCode::invalid_argument:
@@ -79,6 +111,7 @@ Error transportError(const transport::Error& error) {
 struct CommHubServer::Peer {
     std::shared_ptr<transport::IConnection> connection;
     commhub::SessionId session_id;
+    commhub::ServiceRegistration service;
 };
 
 CommHubServer::CommHubServer(std::shared_ptr<transport::IListener> listener,
@@ -241,6 +274,10 @@ void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
         }
         return;
     }
+    if (wire.topic() == "system.service.disconnect") {
+        (void)disconnectPeer(peer, frame);
+        return;
+    }
     if (wire.topic() == "system.heartbeat" ||
         wire.message_type() == envelope::HEARTBEAT) {
         const auto status = handleHeartbeat(peer, frame);
@@ -313,11 +350,13 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
     service.instance_mode = registration.instance_mode() == system_proto::MULTI_INSTANCE
                                 ? commhub::InstanceMode::multi_instance
                                 : commhub::InstanceMode::singleton_per_user;
-    const auto registered = core_.registerService(session.id, std::move(service));
+    const auto registered = core_.registerService(session.id, service);
     if (!registered) {
         core_.disconnect(session.id);
         return Error::protocol(registered.error.message);
     }
+
+    peer->service = service;
 
     peer->session_id = session.id;
     bool installed = false;
@@ -333,17 +372,79 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
         core_.disconnect(session.id);
         return Error::connectionLost("CommHub stopped during registration");
     }
-    lifecycle_lock.unlock();
-
     system_proto::ServiceRegistrationAck ack;
     ack.set_hub_instance_id(hub_instance_id_);
     ack.set_negotiated_protocol_version(1);
+    ack.set_directory_revision(++directory_revision_);
+    for (const auto& instance : core_.services().allInstances()) {
+        setDescriptor(ack.add_services(), instance.registration);
+    }
     const auto reply = serializeReply(
         wire, "industrial_bus.system.v1.ServiceRegistrationAck",
         envelope::RESPONSE_OUTPUT, ack, "commhub", hub_instance_id_);
     const auto sent = peer->connection->send(transport::ByteView(reply));
+    if (sent) {
+        broadcastDirectoryChange(service, true, peer);
+    }
+    lifecycle_lock.unlock();
     return sent ? Result<void>::success()
                 : Result<void>::failure(transportError(sent.error()));
+}
+
+Result<void> CommHubServer::disconnectPeer(
+    const std::shared_ptr<Peer>& peer,
+    const transport::ByteBuffer& frame) {
+    envelope::MessageEnvelope wire;
+    system_proto::ServiceDisconnected disconnected;
+    if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size())) ||
+        !disconnected.ParseFromString(wire.payload()) ||
+        peer->session_id.empty() ||
+        disconnected.service_name() != peer->service.service_name ||
+        disconnected.instance_id() != peer->service.instance_id ||
+        disconnected.node_id() != peer->service.node_id) {
+        return Error::protocol("invalid ServiceDisconnected");
+    }
+
+    std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    const auto service = peer->service;
+    const auto session_id = peer->session_id;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        sessions_.erase(session_id);
+        peers_.erase(std::remove(peers_.begin(), peers_.end(), peer),
+                     peers_.end());
+    }
+    peer->session_id.clear();
+    core_.disconnect(session_id);
+    ++directory_revision_;
+    broadcastDirectoryChange(service, false, peer);
+    return {};
+}
+
+void CommHubServer::broadcastDirectoryChange(
+    const commhub::ServiceRegistration& service, bool added,
+    const std::shared_ptr<Peer>& excluded) {
+    system_proto::ServiceDirectoryUpdate update;
+    update.set_revision(directory_revision_);
+    update.set_change_type(added
+                               ? system_proto::ServiceDirectoryUpdate::ADDED
+                               : system_proto::ServiceDirectoryUpdate::REMOVED);
+    setDescriptor(update.mutable_service(), service);
+    const auto frame = serializeSystemMessage(
+        "system.service.directory",
+        "industrial_bus.system.v1.ServiceDirectoryUpdate", update,
+        hub_instance_id_);
+    std::vector<std::shared_ptr<Peer>> peers;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        peers = peers_;
+    }
+    for (const auto& peer : peers) {
+        if (peer == excluded || peer->session_id.empty()) {
+            continue;
+        }
+        (void)peer->connection->send(transport::ByteView(frame));
+    }
 }
 
 Result<void> CommHubServer::updateSubscription(const std::shared_ptr<Peer>& peer,
@@ -441,6 +542,10 @@ void CommHubServer::expireStaleSessions() {
                          peers_.end());
             peers.push_back(peer);
         }
+    }
+    for (const auto& peer : peers) {
+        ++directory_revision_;
+        broadcastDirectoryChange(peer->service, false, peer);
     }
     lifecycle_lock.unlock();
     for (const auto& peer : peers) {

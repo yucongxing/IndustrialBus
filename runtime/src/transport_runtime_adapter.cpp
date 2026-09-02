@@ -6,6 +6,7 @@
 #include "envelope.pb.h"
 #include "system.pb.h"
 
+#include <algorithm>
 #include <chrono>
 #include <string>
 #include <utility>
@@ -56,6 +57,17 @@ Error fromTransport(const transport::Error& error) {
     return Error::connectionLost(error.message);
 }
 
+ServiceInfo serviceInfo(const system_proto::ServiceDescriptor& descriptor,
+                        const TransportRuntimeOptions& options) {
+    ServiceInfo service;
+    service.service_name = descriptor.service_name();
+    service.instance_id = descriptor.instance_id();
+    service.node_id = descriptor.node_id();
+    service.version = descriptor.version();
+    service.local = service.node_id == options.node_id;
+    return service;
+}
+
 }  // namespace
 
 TransportRuntimeAdapter::TransportRuntimeAdapter(TransportRuntimeOptions options)
@@ -102,6 +114,8 @@ Result<void> TransportRuntimeAdapter::start() {
         heartbeat_disconnect_callback_active_ = false;
         pending_heartbeats_.clear();
         heartbeat_order_.clear();
+        services_.clear();
+        directory_revision_ = 0;
     }
 
     auto connected = options_.connector->connect(options_.endpoint).get();
@@ -250,11 +264,18 @@ std::uint64_t TransportRuntimeAdapter::generation() const {
 }
 
 ServiceSnapshot TransportRuntimeAdapter::services() const {
-    return {{options_.service_name, options_.instance_id, true}};
+    std::lock_guard<std::mutex> lock(mutex_);
+    return services_;
 }
 
 ServiceInfo TransportRuntimeAdapter::localService() const {
-    return {options_.service_name, options_.instance_id, true};
+    ServiceInfo service;
+    service.service_name = options_.service_name;
+    service.instance_id = options_.instance_id;
+    service.node_id = options_.node_id;
+    service.version = options_.service_version;
+    service.local = true;
+    return service;
 }
 
 bool TransportRuntimeAdapter::flush(std::chrono::milliseconds) {
@@ -269,6 +290,7 @@ void TransportRuntimeAdapter::close() noexcept {
     std::uint64_t generation_value = 0;
     bool notify_disconnected = false;
     bool heartbeat_callback_active = false;
+    bool was_registered = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (state_ == ConnectionState::Disconnected && !connection_ &&
@@ -277,6 +299,7 @@ void TransportRuntimeAdapter::close() noexcept {
         }
         notify_disconnected = state_ != ConnectionState::Disconnected &&
                               state_ != ConnectionState::ShuttingDown;
+        was_registered = registered_;
         state_ = ConnectionState::ShuttingDown;
         registered_ = false;
         heartbeat_stop_ = true;
@@ -305,6 +328,9 @@ void TransportRuntimeAdapter::close() noexcept {
         }
     }
     if (connection) {
+        if (was_registered) {
+            sendDeregistration(connection);
+        }
         try {
             connection->setReceiveHandler({});
         } catch (...) {
@@ -321,6 +347,8 @@ void TransportRuntimeAdapter::close() noexcept {
         state_ = ConnectionState::Disconnected;
         pending_heartbeats_.clear();
         heartbeat_order_.clear();
+        services_.clear();
+        directory_revision_ = 0;
     }
     lifecycle_lock.unlock();
     if (notify_disconnected && handler) {
@@ -338,7 +366,10 @@ Result<void> TransportRuntimeAdapter::sendRegistration() {
     registration.set_service_name(options_.service_name);
     registration.set_instance_id(options_.instance_id);
     registration.set_version(options_.service_version);
-    registration.set_instance_mode(system_proto::SINGLETON_PER_USER);
+    registration.set_instance_mode(
+        options_.instance_mode == InstanceMode::MultiInstance
+            ? system_proto::MULTI_INSTANCE
+            : system_proto::SINGLETON_PER_USER);
     const SourceIdentity source{options_.node_id, options_.service_name,
                                 options_.instance_id};
     const auto registration_message_id = generateUuidV4();
@@ -352,6 +383,26 @@ Result<void> TransportRuntimeAdapter::sendRegistration() {
         options_.auth_token, registration_message_id);
     auto sent = connection_->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
+}
+
+void TransportRuntimeAdapter::sendDeregistration(
+    const std::shared_ptr<transport::IConnection>& connection) noexcept {
+    try {
+        system_proto::ServiceDisconnected disconnected;
+        disconnected.set_node_id(options_.node_id);
+        disconnected.set_service_name(options_.service_name);
+        disconnected.set_instance_id(options_.instance_id);
+        disconnected.set_reason("client shutdown");
+        const SourceIdentity source{options_.node_id, options_.service_name,
+                                    options_.instance_id};
+        const auto frame = serializeSystemEnvelope(
+            source, "system.service.disconnect",
+            "industrial_bus.system.v1.ServiceDisconnected", disconnected,
+            options_.auth_token);
+        (void)connection->send(transport::ByteView(frame));
+    } catch (...) {
+        // Deregistration is best-effort; heartbeat expiry remains the fallback.
+    }
 }
 
 Result<void> TransportRuntimeAdapter::sendSubscription(const std::string& topic,
@@ -455,6 +506,8 @@ bool TransportRuntimeAdapter::disconnectFromHeartbeat(
         state_ = ConnectionState::Disconnected;
         registered_ = false;
         heartbeat_stop_ = true;
+        services_.clear();
+        directory_revision_ = 0;
         connection = std::move(connection_);
         generation_value = generation_;
         try {
@@ -515,6 +568,12 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
                 options_.expected_protocol_version) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
+                services_.clear();
+                services_.reserve(static_cast<std::size_t>(ack.services_size()));
+                for (const auto& descriptor : ack.services()) {
+                    services_.push_back(serviceInfo(descriptor, options_));
+                }
+                directory_revision_ = ack.directory_revision();
                 registered_ = true;
                 last_hub_activity_ = std::chrono::steady_clock::now();
             }
@@ -527,6 +586,37 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
             }
             registration_cv_.notify_all();
         }
+        return;
+    }
+
+    if (wire.topic() == "system.service.directory" &&
+        wire.payload_type() ==
+            "industrial_bus.system.v1.ServiceDirectoryUpdate") {
+        system_proto::ServiceDirectoryUpdate update;
+        if (!update.ParseFromString(wire.payload()) || !update.has_service()) {
+            return;
+        }
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!registered_ || update.revision() <= directory_revision_) {
+            return;
+        }
+        if (update.change_type() != system_proto::ServiceDirectoryUpdate::ADDED &&
+            update.change_type() != system_proto::ServiceDirectoryUpdate::REMOVED) {
+            return;
+        }
+        const auto incoming = serviceInfo(update.service(), options_);
+        const auto same_instance = [&](const ServiceInfo& current) {
+            return current.service_name == incoming.service_name &&
+                   current.instance_id == incoming.instance_id;
+        };
+        services_.erase(std::remove_if(services_.begin(), services_.end(),
+                                       same_instance),
+                        services_.end());
+        if (update.change_type() == system_proto::ServiceDirectoryUpdate::ADDED) {
+            services_.push_back(incoming);
+        }
+        directory_revision_ = update.revision();
+        last_hub_activity_ = std::chrono::steady_clock::now();
         return;
     }
 

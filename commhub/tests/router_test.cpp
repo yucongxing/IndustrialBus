@@ -17,13 +17,57 @@ Session session(std::string id, std::string service, std::string instance) {
     return value;
 }
 
-ServiceRegistration registration(std::string service, std::string instance) {
+ServiceRegistration registration(
+    std::string service, std::string instance,
+    InstanceMode mode = InstanceMode::singleton_per_user) {
     ServiceRegistration value;
     value.node_id = "local";
     value.service_name = std::move(service);
     value.instance_id = std::move(instance);
-    value.instance_mode = InstanceMode::singleton_per_user;
+    value.instance_mode = mode;
     return value;
+}
+
+TEST(CommHubRouterTest, RoutesExactlyAcrossMultipleServiceInstances) {
+    const auto now = std::chrono::steady_clock::now();
+    constexpr std::int64_t unix_now = 1'000'000'000;
+    HubCore hub;
+
+    ASSERT_TRUE(hub.connect(session("caller", "caller", "caller-1"), now));
+    ASSERT_TRUE(hub.connect(session("cmp-a", "cmp-suite", "channel-a"), now));
+    ASSERT_TRUE(hub.connect(session("cmp-b", "cmp-suite", "channel-b"), now));
+    ASSERT_TRUE(hub.registerService(
+        "cmp-a", registration("cmp-suite", "channel-a",
+                              InstanceMode::multi_instance)));
+    ASSERT_TRUE(hub.registerService(
+        "cmp-b", registration("cmp-suite", "channel-b",
+                              InstanceMode::multi_instance)));
+
+    RouteMessage command;
+    command.message_id = "command-b";
+    command.source_service = "caller";
+    command.source_instance = "caller-1";
+    command.destination_service = "cmp-suite";
+    command.destination_instance = "channel-b";
+    command.topic = "cmp.channel.channel-b.simulation.run";
+    command.kind = MessageKind::command;
+    command.deadline_unix_ns = unix_now + 1'000'000'000;
+    const auto routed = hub.dispatch("caller", command, now, unix_now);
+    ASSERT_TRUE(routed);
+    ASSERT_EQ(routed.targets.size(), 1U);
+    EXPECT_EQ(routed.targets.front(), "cmp-b");
+
+    EXPECT_FALSE(hub.services().resolve("cmp-suite", {},
+                                        SelectionPolicy::prefer_local,
+                                        "local"));
+    EXPECT_EQ(hub.services().allInstances().size(), 2U);
+
+    ASSERT_TRUE(hub.connect(session("singleton", "cmp-suite", "channel-c"),
+                            now));
+    const auto conflict = hub.registerService(
+        "singleton", registration("cmp-suite", "channel-c"));
+    EXPECT_FALSE(conflict);
+    EXPECT_EQ(conflict.error.code, HubErrorCode::service_already_registered);
 }
 
 }  // namespace
