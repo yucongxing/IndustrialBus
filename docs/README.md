@@ -6,6 +6,7 @@ ownership, target layout, runtime lifecycles, and test coverage.
 
 - [Module responsibilities](modules.md)
 - [Runtime lifecycle](runtime-lifecycle.md)
+- [CMake install and package consumption](cmake-install.md)
 - [Testing](testing.md)
 - [Simulated LayoutView/CMPSuite](simulated-apps.md)
 

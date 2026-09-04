@@ -28,6 +28,18 @@ cmake --build build -j
 ctest --test-dir build --output-on-failure
 ```
 
+Install the SDK and CommHub into a local prefix:
+
+```sh
+cmake --install build --prefix "$HOME/deps/industrial-bus"
+```
+
+An independent application can then use
+`find_package(IndustrialBus CONFIG REQUIRED)` and link the exported
+`IndustrialBus::*` targets. See
+[`docs/cmake-install.md`](docs/cmake-install.md) for the installed layout,
+consumer example, and CommHub executable discovery.
+
 For a dependency-free core-only build, disable the external integrations:
 
 ```sh

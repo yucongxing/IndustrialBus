@@ -8,6 +8,7 @@ project(
 
 include(CTest)
 include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
@@ -62,4 +63,93 @@ if(INDUSTRIAL_BUS_BUILD_SIMULATED_APPS)
         message(STATUS
             "Skipping simulated apps because Protobuf or ZeroMQ is disabled")
     endif()
+endif()
+
+set(INDUSTRIAL_BUS_INSTALL_CMAKEDIR
+    "${CMAKE_INSTALL_LIBDIR}/cmake/IndustrialBus"
+    CACHE STRING "Install location for IndustrialBus CMake package files")
+
+set(industrial_bus_install_targets
+    industrial_bus_core
+    industrial_bus_transport_spi
+    industrial_bus_transport_loopback
+    industrial_bus_bootstrap
+    industrial_bus_commhub_core)
+
+foreach(optional_target IN ITEMS
+        industrial_bus_protocol
+        industrial_bus_transport_zeromq
+        industrial_bus_client
+        industrial_bus_integration
+        industrial_bus_runtime
+        commhub)
+    if(TARGET ${optional_target})
+        list(APPEND industrial_bus_install_targets ${optional_target})
+    endif()
+endforeach()
+
+install(TARGETS ${industrial_bus_install_targets}
+    EXPORT IndustrialBusTargets
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+    RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
+    INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+
+install(DIRECTORY
+    api/include/
+    bootstrap/include/
+    client/include/
+    commhub/include/
+    core/include/
+    runtime/include/
+    transport/include/
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    FILES_MATCHING PATTERN "*.h")
+
+install(FILES
+    transport/loopback/loopback_transport.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/industrial_bus/transport)
+
+if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
+    install(FILES
+        transport/zeromq/zeromq_transport.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/industrial_bus/transport)
+endif()
+
+install(FILES
+    cmake/FindZeroMQ.cmake
+    cmake/Findcppzmq.cmake
+    DESTINATION ${INDUSTRIAL_BUS_INSTALL_CMAKEDIR})
+
+configure_package_config_file(
+    cmake/IndustrialBusConfig.cmake.in
+    "${CMAKE_CURRENT_BINARY_DIR}/IndustrialBusConfig.cmake"
+    INSTALL_DESTINATION ${INDUSTRIAL_BUS_INSTALL_CMAKEDIR}
+    PATH_VARS CMAKE_INSTALL_BINDIR)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/IndustrialBusConfigVersion.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMinorVersion)
+
+install(EXPORT IndustrialBusTargets
+    FILE IndustrialBusTargets.cmake
+    NAMESPACE IndustrialBus::
+    DESTINATION ${INDUSTRIAL_BUS_INSTALL_CMAKEDIR})
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/IndustrialBusConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/IndustrialBusConfigVersion.cmake"
+    DESTINATION ${INDUSTRIAL_BUS_INSTALL_CMAKEDIR})
+
+if(INDUSTRIAL_BUS_BUILD_TESTS)
+    configure_file(
+        cmake/tests/install_consumer_test.cmake.in
+        "${CMAKE_CURRENT_BINARY_DIR}/install_consumer_test.cmake"
+        @ONLY)
+    add_test(
+        NAME CMakeInstallConsumerTest
+        COMMAND ${CMAKE_COMMAND}
+            -DTEST_CONFIG=$<CONFIG>
+            -P "${CMAKE_CURRENT_BINARY_DIR}/install_consumer_test.cmake")
 endif()

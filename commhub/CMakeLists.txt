@@ -7,6 +7,7 @@ add_library(industrial_bus_commhub_core STATIC
     src/session_registry.cpp
 )
 add_library(IndustrialBus::CommHubCore ALIAS industrial_bus_commhub_core)
+set_target_properties(industrial_bus_commhub_core PROPERTIES EXPORT_NAME CommHubCore)
 target_compile_features(industrial_bus_commhub_core PUBLIC cxx_std_17)
 target_include_directories(industrial_bus_commhub_core
     PUBLIC

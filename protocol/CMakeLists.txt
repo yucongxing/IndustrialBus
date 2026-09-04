@@ -22,10 +22,13 @@ set(INDUSTRIAL_BUS_PROTO_FILES
 
 add_library(industrial_bus_protocol STATIC ${INDUSTRIAL_BUS_PROTO_FILES})
 add_library(IndustrialBus::Protocol ALIAS industrial_bus_protocol)
+set_target_properties(industrial_bus_protocol PROPERTIES EXPORT_NAME Protocol)
 
 target_link_libraries(industrial_bus_protocol PUBLIC protobuf::libprotobuf)
 target_include_directories(industrial_bus_protocol
-    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+    PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_BINARY_DIR}>
+        $<INSTALL_INTERFACE:include>
 )
 
 protobuf_generate(
@@ -34,3 +37,15 @@ protobuf_generate(
     IMPORT_DIRS ${CMAKE_CURRENT_SOURCE_DIR}/proto
     PROTOC_OUT_DIR ${CMAKE_CURRENT_BINARY_DIR}
 )
+
+set(INDUSTRIAL_BUS_PROTO_HEADERS)
+foreach(proto_file IN LISTS INDUSTRIAL_BUS_PROTO_FILES)
+    get_filename_component(proto_name "${proto_file}" NAME_WE)
+    list(APPEND INDUSTRIAL_BUS_PROTO_HEADERS
+        "${CMAKE_CURRENT_BINARY_DIR}/${proto_name}.pb.h")
+endforeach()
+
+install(FILES ${INDUSTRIAL_BUS_PROTO_HEADERS}
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES ${INDUSTRIAL_BUS_PROTO_FILES}
+    DESTINATION ${CMAKE_INSTALL_DATADIR}/industrial-bus/proto)

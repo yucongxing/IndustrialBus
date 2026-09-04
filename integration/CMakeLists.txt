@@ -7,6 +7,7 @@ add_library(industrial_bus_integration STATIC
     progress/progress_throttle.cpp
 )
 add_library(IndustrialBus::Integration ALIAS industrial_bus_integration)
+set_target_properties(industrial_bus_integration PROPERTIES EXPORT_NAME Integration)
 
 target_include_directories(industrial_bus_integration
     PUBLIC

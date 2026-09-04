@@ -25,5 +25,11 @@ CTest timeouts. A
 no-test core-only build sets both `BUILD_TESTING=OFF` and
 `INDUSTRIAL_BUS_BUILD_TESTS=OFF` and therefore does not require GoogleTest.
 
+`CMakeInstallConsumerTest` installs the current build into a clean staging
+prefix, configures a separate consumer using only
+`find_package(IndustrialBus CONFIG REQUIRED)`, compiles and links Client/Core/
+Protocol, verifies the installed CommHub path, and runs the consumer. This
+guards against accidentally exporting build-tree include or library paths.
+
 Current gaps are protocol compatibility fixtures, dedicated Integration helper
 tests, failure injection, and stress/soak coverage.

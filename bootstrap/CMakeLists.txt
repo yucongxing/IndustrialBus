@@ -6,6 +6,7 @@ add_library(industrial_bus_bootstrap STATIC
     src/secure_files.cpp
 )
 add_library(IndustrialBus::Bootstrap ALIAS industrial_bus_bootstrap)
+set_target_properties(industrial_bus_bootstrap PROPERTIES EXPORT_NAME Bootstrap)
 
 target_compile_features(industrial_bus_bootstrap PUBLIC cxx_std_17)
 target_include_directories(industrial_bus_bootstrap

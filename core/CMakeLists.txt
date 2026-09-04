@@ -4,12 +4,14 @@ add_library(industrial_bus_core STATIC
     src/operation_state.cpp
 )
 add_library(IndustrialBus::Core ALIAS industrial_bus_core)
+set_target_properties(industrial_bus_core PROPERTIES EXPORT_NAME Core)
 
 target_compile_features(industrial_bus_core PUBLIC cxx_std_17)
 target_include_directories(industrial_bus_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../api/include>
+        $<INSTALL_INTERFACE:include>
 )
 
 if(BUILD_TESTING)

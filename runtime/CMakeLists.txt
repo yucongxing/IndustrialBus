@@ -5,6 +5,7 @@ add_library(industrial_bus_runtime STATIC
     src/commhub_server.cpp
 )
 add_library(IndustrialBus::Runtime ALIAS industrial_bus_runtime)
+set_target_properties(industrial_bus_runtime PROPERTIES EXPORT_NAME Runtime)
 
 target_include_directories(industrial_bus_runtime
     PUBLIC
@@ -40,6 +41,7 @@ endif()
 
 if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
     add_executable(commhub ../commhub/main.cpp)
+    set_target_properties(commhub PROPERTIES EXPORT_NAME CommHub)
     target_link_libraries(commhub
         PRIVATE
             IndustrialBus::Runtime

@@ -1,5 +1,7 @@
 add_library(industrial_bus_transport_spi INTERFACE)
 add_library(IndustrialBus::TransportSPI ALIAS industrial_bus_transport_spi)
+set_target_properties(industrial_bus_transport_spi
+    PROPERTIES EXPORT_NAME TransportSPI)
 target_include_directories(industrial_bus_transport_spi
     INTERFACE
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -10,12 +12,15 @@ add_library(industrial_bus_transport_loopback STATIC
     loopback/loopback_transport.cpp
 )
 add_library(IndustrialBus::TransportLoopback ALIAS industrial_bus_transport_loopback)
+set_target_properties(industrial_bus_transport_loopback
+    PROPERTIES EXPORT_NAME TransportLoopback)
 target_compile_features(industrial_bus_transport_loopback PUBLIC cxx_std_17)
 target_include_directories(industrial_bus_transport_loopback
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/loopback>
-        $<INSTALL_INTERFACE:include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/loopback>
+            $<INSTALL_INTERFACE:include>
+            $<INSTALL_INTERFACE:include/industrial_bus/transport>
 )
 set_target_properties(industrial_bus_transport_loopback PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(industrial_bus_transport_loopback
@@ -26,12 +31,15 @@ if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)
         zeromq/zeromq_transport.cpp
     )
     add_library(IndustrialBus::TransportZeroMQ ALIAS industrial_bus_transport_zeromq)
+    set_target_properties(industrial_bus_transport_zeromq
+        PROPERTIES EXPORT_NAME TransportZeroMQ)
     target_compile_features(industrial_bus_transport_zeromq PUBLIC cxx_std_17)
     target_include_directories(industrial_bus_transport_zeromq
         PUBLIC
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/zeromq>
             $<INSTALL_INTERFACE:include>
+            $<INSTALL_INTERFACE:include/industrial_bus/transport>
     )
     target_link_libraries(industrial_bus_transport_zeromq
         PUBLIC

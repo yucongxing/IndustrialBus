@@ -10,6 +10,7 @@ add_library(industrial_bus_client STATIC
     src/pending_request_table.cpp
 )
 add_library(IndustrialBus::Client ALIAS industrial_bus_client)
+set_target_properties(industrial_bus_client PROPERTIES EXPORT_NAME Client)
 
 target_include_directories(industrial_bus_client
     PUBLIC

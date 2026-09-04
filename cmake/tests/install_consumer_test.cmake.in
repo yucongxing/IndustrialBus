@@ -1,0 +1,72 @@
+set(install_root "@CMAKE_CURRENT_BINARY_DIR@/install-consumer-test")
+set(install_prefix "${install_root}/prefix")
+set(consumer_build "${install_root}/build")
+set(dependency_prefix_path "@CMAKE_PREFIX_PATH@")
+
+file(REMOVE_RECURSE "${install_root}")
+
+set(install_command
+    "@CMAKE_COMMAND@" --install "@CMAKE_BINARY_DIR@"
+    --prefix "${install_prefix}")
+if(NOT TEST_CONFIG STREQUAL "")
+    list(APPEND install_command --config "${TEST_CONFIG}")
+endif()
+execute_process(
+    COMMAND ${install_command}
+    RESULT_VARIABLE install_result
+    OUTPUT_VARIABLE install_output
+    ERROR_VARIABLE install_error)
+if(NOT install_result EQUAL 0)
+    message(FATAL_ERROR
+        "IndustrialBus install failed:\n${install_output}\n${install_error}")
+endif()
+
+set(consumer_prefix_path "${install_prefix}")
+if(NOT dependency_prefix_path STREQUAL "")
+    list(APPEND consumer_prefix_path ${dependency_prefix_path})
+endif()
+
+execute_process(
+    COMMAND "@CMAKE_COMMAND@"
+        -S "@CMAKE_CURRENT_SOURCE_DIR@/cmake/tests/install_consumer"
+        -B "${consumer_build}"
+        "-DCMAKE_PREFIX_PATH=${consumer_prefix_path}"
+        "-DCMAKE_BUILD_TYPE=@CMAKE_BUILD_TYPE@"
+    RESULT_VARIABLE configure_result
+    OUTPUT_VARIABLE configure_output
+    ERROR_VARIABLE configure_error)
+if(NOT configure_result EQUAL 0)
+    message(FATAL_ERROR
+        "Installed-package consumer configure failed:\n"
+        "${configure_output}\n${configure_error}")
+endif()
+
+set(build_command "@CMAKE_COMMAND@" --build "${consumer_build}")
+if(NOT TEST_CONFIG STREQUAL "")
+    list(APPEND build_command --config "${TEST_CONFIG}")
+endif()
+execute_process(
+    COMMAND ${build_command}
+    RESULT_VARIABLE build_result
+    OUTPUT_VARIABLE build_output
+    ERROR_VARIABLE build_error)
+if(NOT build_result EQUAL 0)
+    message(FATAL_ERROR
+        "Installed-package consumer build failed:\n"
+        "${build_output}\n${build_error}")
+endif()
+
+if("@CMAKE_CONFIGURATION_TYPES@" STREQUAL "")
+    set(consumer_executable
+        "${consumer_build}/industrial_bus_install_consumer")
+else()
+    set(consumer_executable
+        "${consumer_build}/${TEST_CONFIG}/industrial_bus_install_consumer")
+endif()
+execute_process(
+    COMMAND "${consumer_executable}"
+    RESULT_VARIABLE run_result)
+if(NOT run_result EQUAL 0)
+    message(FATAL_ERROR
+        "Installed-package consumer exited with ${run_result}")
+endif()

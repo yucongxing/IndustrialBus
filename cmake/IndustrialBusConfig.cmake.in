@@ -1,0 +1,45 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+set(IndustrialBus_WITH_PROTOBUF @INDUSTRIAL_BUS_ENABLE_PROTOBUF@)
+set(IndustrialBus_WITH_ZEROMQ @INDUSTRIAL_BUS_ENABLE_ZEROMQ@)
+
+find_dependency(Threads REQUIRED)
+
+if(@INDUSTRIAL_BUS_ENABLE_PROTOBUF@)
+    find_package(Protobuf CONFIG QUIET)
+    if(NOT TARGET protobuf::libprotobuf)
+        find_dependency(Protobuf REQUIRED)
+    endif()
+endif()
+
+if(@INDUSTRIAL_BUS_ENABLE_ZEROMQ@)
+    set(_industrial_bus_saved_module_path "${CMAKE_MODULE_PATH}")
+    list(PREPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}")
+    find_dependency(ZeroMQ REQUIRED)
+    find_dependency(cppzmq REQUIRED)
+    set(CMAKE_MODULE_PATH "${_industrial_bus_saved_module_path}")
+    unset(_industrial_bus_saved_module_path)
+endif()
+
+include("${CMAKE_CURRENT_LIST_DIR}/IndustrialBusTargets.cmake")
+
+foreach(_industrial_bus_component IN ITEMS
+        Core TransportSPI TransportLoopback Bootstrap CommHubCore Protocol
+        TransportZeroMQ Client Integration Runtime CommHub)
+    if(TARGET IndustrialBus::${_industrial_bus_component})
+        set(IndustrialBus_${_industrial_bus_component}_FOUND TRUE)
+    else()
+        set(IndustrialBus_${_industrial_bus_component}_FOUND FALSE)
+    endif()
+endforeach()
+unset(_industrial_bus_component)
+
+if(TARGET IndustrialBus::CommHub)
+    set_and_check(
+        IndustrialBus_COMMHUB_EXECUTABLE
+        "${PACKAGE_PREFIX_DIR}/@CMAKE_INSTALL_BINDIR@/commhub")
+endif()
+
+check_required_components(IndustrialBus)
