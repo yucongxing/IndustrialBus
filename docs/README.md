@@ -8,6 +8,7 @@ ownership, target layout, runtime lifecycles, and test coverage.
 - [Runtime lifecycle](runtime-lifecycle.md)
 - [CMake install and package consumption](cmake-install.md)
 - [Testing](testing.md)
+- [Topic Catalog and protocol validation](topic-catalog-protocol-validation.md)
 - [Simulated LayoutView/CMPSuite](simulated-apps.md)
 
 Documentation is part of the definition of done. A change that moves a

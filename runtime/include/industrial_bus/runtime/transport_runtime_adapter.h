@@ -1,6 +1,7 @@
 #pragma once
 
 #include "industrial_bus/client/runtime_adapter.h"
+#include "industrial_bus/runtime/protocol_validation.h"
 #include "industrial_bus/transport/transport.h"
 
 #include <chrono>
@@ -29,6 +30,8 @@ struct TransportRuntimeOptions {
     std::chrono::milliseconds handshake_timeout{std::chrono::seconds(3)};
     std::chrono::milliseconds heartbeat_interval{std::chrono::seconds(2)};
     std::chrono::milliseconds heartbeat_timeout{std::chrono::seconds(6)};
+    ProtocolLimits protocol_limits{};
+    TopicCatalogView topic_catalog{productionTopicCatalog()};
 };
 
 class TransportRuntimeAdapter final : public client::IRuntimeAdapter {
@@ -63,6 +66,7 @@ private:
 
     std::recursive_mutex lifecycle_mutex_;
     TransportRuntimeOptions options_;
+    ProtocolValidator protocol_validator_;
     std::shared_ptr<transport::IConnection> connection_;
     mutable std::mutex mutex_;
     std::condition_variable registration_cv_;

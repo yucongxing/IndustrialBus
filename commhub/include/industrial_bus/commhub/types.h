@@ -26,6 +26,7 @@ enum class HubErrorCode {
     route_not_found,
     deadline_expired,
     resource_exhausted,
+    protocol_error,
 };
 
 struct HubError {

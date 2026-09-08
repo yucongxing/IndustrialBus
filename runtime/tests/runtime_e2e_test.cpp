@@ -4,8 +4,11 @@
 #include "industrial_bus/runtime/commhub_server.h"
 #include "industrial_bus/runtime/envelope_codec.h"
 #include "industrial_bus/runtime/transport_runtime_adapter.h"
+#include "industrial_bus/topics.generated.h"
 #include "loopback_transport.h"
+#include "test_topic_catalog.h"
 
+#include "cmp.pb.h"
 #include "envelope.pb.h"
 #include "operation.pb.h"
 #include "system.pb.h"
@@ -192,7 +195,29 @@ protocol::v1::MessageEnvelope codecEnvelope(
     wire.set_protocol_version(1);
     wire.set_schema_version(1);
     wire.set_max_hops(1);
+    const auto now = std::chrono::system_clock::now();
+    wire.set_timestamp_unix_ns(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(now.time_since_epoch())
+            .count());
     wire.set_payload("payload");
+    if (message_type == protocol::v1::COMMAND ||
+        message_type == protocol::v1::REQUEST) {
+        wire.set_destination_service("worker");
+        wire.set_deadline_unix_ns(
+            std::chrono::duration_cast<std::chrono::nanoseconds>(
+                (now + std::chrono::hours(1)).time_since_epoch())
+                .count());
+    }
+    if (message_type == protocol::v1::COMMAND) {
+        wire.set_idempotency_key("codec-intent");
+    }
+    if (message_type == protocol::v1::REPLY) {
+        wire.set_destination_service("caller");
+        wire.set_causation_id("codec-request");
+    }
+    if (message_type == protocol::v1::PROGRESS) {
+        wire.set_operation_id("codec-operation");
+    }
     return wire;
 }
 
@@ -212,6 +237,12 @@ client::OutboundMessage outboundFromInbound(
     outbound.payload = inbound.payload;
     outbound.idempotency_key = inbound.idempotency_key;
     outbound.deadline_unix_ns = inbound.deadline_unix_ns;
+    if (inbound.message_type == MessageType::Command ||
+        inbound.message_type == MessageType::Request) {
+        outbound.destination.service_name = "worker";
+    } else if (inbound.message_type == MessageType::Reply) {
+        outbound.destination.service_name = "caller";
+    }
     if (inbound.has_error) {
         outbound.error = std::make_shared<Error>(inbound.error);
     }
@@ -274,11 +305,13 @@ TEST(EnvelopeCodecTest, RoundTripsEverySupportedMessageTypeExactly) {
             original.set_payload_type(error.GetDescriptor()->full_name());
         }
 
-        auto decoded = runtime::decodeInbound(serializeEnvelope(original));
+        const auto validator = runtime::test::protocolValidator();
+        auto decoded = runtime::decodeInbound(serializeEnvelope(original), validator);
         ASSERT_TRUE(decoded) << decoded.error().message;
         auto reencoded = runtime::encodeOutbound(
             outboundFromInbound(decoded.value()),
-            runtime::SourceIdentity{"node", "codec-source", "codec-instance"});
+            runtime::SourceIdentity{"node", "codec-source", "codec-instance"},
+            validator);
         ASSERT_TRUE(reencoded) << reencoded.error().message;
 
         protocol::v1::MessageEnvelope round_trip;
@@ -314,10 +347,23 @@ TEST(EnvelopeCodecTest, WritesCanonicalPriorityAndSemanticClassHeader) {
         outbound.topic = "test.codec.metadata";
         outbound.payload_type = "test.Bytes";
         outbound.payload = {'x'};
+        if (test_case.message_type == MessageType::Command ||
+            test_case.message_type == MessageType::Request) {
+            outbound.destination.service_name = "worker";
+            outbound.deadline_unix_ns = deadlineAfter(std::chrono::hours(1));
+        }
+        if (test_case.message_type == MessageType::Command) {
+            outbound.idempotency_key = "metadata-intent";
+        }
+        if (test_case.message_type == MessageType::Reply) {
+            outbound.destination.service_name = "caller";
+            outbound.causation_id = "metadata-request";
+        }
 
         auto encoded = runtime::encodeOutbound(
             outbound,
-            runtime::SourceIdentity{"node", "codec-source", "codec-instance"});
+            runtime::SourceIdentity{"node", "codec-source", "codec-instance"},
+            runtime::test::protocolValidator());
         ASSERT_TRUE(encoded) << encoded.error().message;
         protocol::v1::MessageEnvelope wire;
         ASSERT_TRUE(wire.ParseFromArray(encoded.value().data(),
@@ -335,8 +381,9 @@ TEST(EnvelopeCodecTest, WritesCanonicalPriorityAndSemanticClassHeader) {
 TEST(EnvelopeCodecTest, RejectsInvalidTypePriorityAndSemanticMetadata) {
     const auto expect_rejected = [](protocol::v1::MessageEnvelope wire) {
         const auto frame = serializeEnvelope(wire);
-        EXPECT_FALSE(runtime::decodeInbound(frame));
-        EXPECT_FALSE(runtime::decodeRouteMessage(frame));
+        const auto validator = runtime::test::protocolValidator();
+        EXPECT_FALSE(runtime::decodeInbound(frame, validator));
+        EXPECT_FALSE(runtime::decodeRouteMessage(frame, validator));
     };
 
     expect_rejected(codecEnvelope(protocol::v1::MESSAGE_TYPE_UNSPECIFIED,
@@ -363,15 +410,17 @@ TEST(EnvelopeCodecTest, AppliesSafeFallbackToLegacyHeaderlessMessage) {
     ASSERT_TRUE(legacy.headers().empty());
     const auto frame = serializeEnvelope(legacy);
 
-    auto route = runtime::decodeRouteMessage(frame);
+    const auto validator = runtime::test::protocolValidator();
+    auto route = runtime::decodeRouteMessage(frame, validator);
     ASSERT_TRUE(route) << route.error().message;
     EXPECT_EQ(route.value().priority, 1U);
 
-    auto inbound = runtime::decodeInbound(frame);
+    auto inbound = runtime::decodeInbound(frame, validator);
     ASSERT_TRUE(inbound) << inbound.error().message;
     auto encoded = runtime::encodeOutbound(
         outboundFromInbound(inbound.value()),
-        runtime::SourceIdentity{"node", "codec-source", "codec-instance"});
+        runtime::SourceIdentity{"node", "codec-source", "codec-instance"},
+        validator);
     ASSERT_TRUE(encoded) << encoded.error().message;
     protocol::v1::MessageEnvelope normalized;
     ASSERT_TRUE(normalized.ParseFromArray(
@@ -395,8 +444,9 @@ TEST(EnvelopeCodecTest, RejectsMismatchedCanonicalProgressOperationIds) {
     ASSERT_TRUE(progress.SerializeToString(wire.mutable_payload()));
 
     const auto frame = serializeEnvelope(wire);
-    EXPECT_FALSE(runtime::decodeInbound(frame));
-    EXPECT_FALSE(runtime::decodeRouteMessage(frame));
+    EXPECT_FALSE(runtime::decodeInbound(frame, runtime::test::protocolValidator()));
+    EXPECT_FALSE(runtime::decodeRouteMessage(frame,
+                                             runtime::test::protocolValidator()));
 }
 
 TEST(EnvelopeCodecTest, PreservesStructuredError) {
@@ -409,6 +459,8 @@ TEST(EnvelopeCodecTest, PreservesStructuredError) {
     reply.correlation_id = "correlation";
     reply.causation_id = "request-message";
     reply.operation_id = "operation";
+    reply.destination.service_name = "caller";
+    reply.destination.instance_id = "caller-instance";
     reply.topic = "test.request";
     reply.payload_type = "industrial_bus.system.v1.Error";
     reply.error = std::make_shared<Error>(
@@ -417,9 +469,11 @@ TEST(EnvelopeCodecTest, PreservesStructuredError) {
     reply.error->context["key"] = "intent-1";
 
     auto encoded = runtime::encodeOutbound(
-        reply, runtime::SourceIdentity{"node", "worker", "worker-instance"});
+        reply, runtime::SourceIdentity{"node", "worker", "worker-instance"},
+        runtime::test::protocolValidator());
     ASSERT_TRUE(encoded);
-    auto decoded = runtime::decodeInbound(encoded.value());
+    auto decoded = runtime::decodeInbound(encoded.value(),
+                                           runtime::test::protocolValidator());
     ASSERT_TRUE(decoded);
     EXPECT_TRUE(decoded.value().message_type == MessageType::Reply);
     EXPECT_TRUE(decoded.value().payload_role == client::PayloadRole::ErrorDetail);
@@ -489,7 +543,10 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
 
     auto loopback = std::make_shared<transport::LoopbackHub>();
     const transport::Endpoint endpoint{"loopback://runtime-e2e"};
-    runtime::CommHubServer hub(loopback, endpoint, "hub-e2e", "test-token");
+    runtime::CommHubServerOptions hub_options;
+    hub_options.topic_catalog = runtime::test::topicCatalog();
+    runtime::CommHubServer hub(loopback, endpoint, "hub-e2e", "test-token",
+                               hub_options);
     ASSERT_TRUE(hub.start());
 
     runtime::TransportRuntimeOptions rejected_options;
@@ -499,6 +556,7 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
     rejected_options.instance_id = "rejected-instance";
     rejected_options.auth_token = "wrong-token";
     rejected_options.handshake_timeout = std::chrono::milliseconds(20);
+    rejected_options.topic_catalog = runtime::test::topicCatalog();
     runtime::TransportRuntimeAdapter rejected(rejected_options);
     EXPECT_TRUE(!rejected.start());
 
@@ -508,6 +566,7 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
     caller_options.service_name = "caller";
     caller_options.instance_id = "caller-instance";
     caller_options.auth_token = "test-token";
+    caller_options.topic_catalog = runtime::test::topicCatalog();
     auto caller = std::make_shared<runtime::TransportRuntimeAdapter>(caller_options);
 
     runtime::TransportRuntimeOptions worker_options;
@@ -516,11 +575,13 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
     worker_options.service_name = "worker";
     worker_options.instance_id = "worker-instance";
     worker_options.auth_token = "test-token";
+    worker_options.topic_catalog = runtime::test::topicCatalog();
     auto worker = std::make_shared<runtime::TransportRuntimeAdapter>(worker_options);
 
     std::mutex mutex;
     std::condition_variable changed;
     std::string caller_event;
+    std::string parameterized_operation;
     std::string command_ack;
     bool duplicate_ack = false;
     int ack_count = 0;
@@ -536,6 +597,12 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
             command_ack = ack.operation_id();
             duplicate_ack = ack.duplicate();
             ++ack_count;
+        } else if (message.payload_type ==
+                   cmp::v1::SimulationCompleted::descriptor()->full_name()) {
+            cmp::v1::SimulationCompleted completed;
+            EXPECT_TRUE(PayloadCodec<cmp::v1::SimulationCompleted>::decode(
+                message.payload, completed));
+            parameterized_operation = completed.operation_id();
         } else {
             caller_event.assign(message.payload.begin(), message.payload.end());
         }
@@ -570,6 +637,24 @@ TEST(RuntimeE2eTest, RoutesEventsCommandsAndErrors) {
         std::unique_lock<std::mutex> lock(mutex);
         EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
             return caller_event == "broadcast";
+        }));
+    }
+
+    const topics::ChannelTopics channel_topics(
+        "123e4567-e89b-42d3-a456-426614174000");
+    const auto completed_topic = channel_topics.simulationCompleted();
+    EXPECT_TRUE(caller->subscribe(std::string(completed_topic.name)));
+    cmp::v1::SimulationCompleted completed;
+    completed.set_operation_id("parameterized-operation");
+    PublishOptions completed_options;
+    completed_options.operation_id = completed.operation_id();
+    const auto published = worker_bus->publish(
+        completed_topic, completed, std::move(completed_options));
+    ASSERT_TRUE(published) << published.error().message;
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        EXPECT_TRUE(changed.wait_for(lock, std::chrono::seconds(1), [&] {
+            return parameterized_operation == "parameterized-operation";
         }));
     }
 
@@ -695,7 +780,10 @@ TEST(RuntimeE2eTest, DiscoversMultipleInstancesAndRemovesClosedServices) {
 TEST(RuntimeE2eTest, DisconnectsOnlyFailingBroadcastSubscriber) {
     auto failing_listener = std::make_shared<SelectivelyFailingListener>();
     const transport::Endpoint endpoint{"loopback://runtime-slow-consumer"};
-    runtime::CommHubServer hub(failing_listener, endpoint, "hub-slow", "token");
+    runtime::CommHubServerOptions hub_options;
+    hub_options.topic_catalog = runtime::test::topicCatalog();
+    runtime::CommHubServer hub(failing_listener, endpoint, "hub-slow", "token",
+                               hub_options);
     ASSERT_TRUE(hub.start());
 
     const auto make_options = [&](std::string service, std::string instance) {
@@ -706,6 +794,7 @@ TEST(RuntimeE2eTest, DisconnectsOnlyFailingBroadcastSubscriber) {
         options.instance_id = std::move(instance);
         options.auth_token = "token";
         options.expected_hub_instance_id = "hub-slow";
+        options.topic_catalog = runtime::test::topicCatalog();
         return options;
     };
 

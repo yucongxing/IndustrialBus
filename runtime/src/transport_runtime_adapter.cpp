@@ -3,6 +3,7 @@
 #include "industrial_bus/ids.h"
 #include "industrial_bus/qos.h"
 #include "industrial_bus/runtime/envelope_codec.h"
+#include "industrial_bus/topics.generated.h"
 
 #include "envelope.pb.h"
 #include "system.pb.h"
@@ -45,6 +46,10 @@ transport::ByteBuffer serializeSystemEnvelope(
     wire.set_protocol_version(1);
     wire.set_schema_version(1);
     wire.set_max_hops(1);
+    wire.set_timestamp_unix_ns(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
     if (!auth_token.empty()) {
         (*wire.mutable_headers())["authorization"] = auth_token;
     }
@@ -78,7 +83,8 @@ ServiceInfo serviceInfo(const system_proto::ServiceDescriptor& descriptor,
 }  // namespace
 
 TransportRuntimeAdapter::TransportRuntimeAdapter(TransportRuntimeOptions options)
-    : options_(std::move(options)) {
+    : options_(std::move(options)),
+      protocol_validator_(options_.topic_catalog, options_.protocol_limits) {
     if (options_.instance_id.empty()) {
         options_.instance_id = generateUuidV4();
     }
@@ -234,7 +240,7 @@ Result<void> TransportRuntimeAdapter::send(client::OutboundMessage message) {
     }
     const SourceIdentity source{options_.node_id, options_.service_name,
                                 options_.instance_id};
-    auto encoded = encodeOutbound(message, source);
+    auto encoded = encodeOutbound(message, source, protocol_validator_);
     if (!encoded) {
         return encoded.error();
     }
@@ -385,8 +391,8 @@ Result<void> TransportRuntimeAdapter::sendRegistration() {
         registration_message_id_ = registration_message_id;
     }
     const auto frame = serializeSystemEnvelope(
-        source, "system.service.register",
-        "industrial_bus.system.v1.ServiceRegistration", registration,
+        source, std::string(topics::kServiceRegisterInput.name),
+        std::string(topics::kServiceRegisterInput.payload_type), registration,
         options_.auth_token, registration_message_id);
     auto sent = connection_->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
@@ -403,9 +409,9 @@ void TransportRuntimeAdapter::sendDeregistration(
         const SourceIdentity source{options_.node_id, options_.service_name,
                                     options_.instance_id};
         const auto frame = serializeSystemEnvelope(
-            source, "system.service.disconnect",
-            "industrial_bus.system.v1.ServiceDisconnected", disconnected,
-            options_.auth_token);
+            source, std::string(topics::kServiceDisconnect.name),
+            std::string(topics::kServiceDisconnect.payload_type), disconnected,
+            {});
         (void)connection->send(transport::ByteView(frame));
     } catch (...) {
         // Deregistration is best-effort; heartbeat expiry remains the fallback.
@@ -431,9 +437,9 @@ Result<void> TransportRuntimeAdapter::sendSubscription(const std::string& topic,
     const SourceIdentity source{options_.node_id, options_.service_name,
                                 options_.instance_id};
     const auto frame = serializeSystemEnvelope(
-        source, "system.subscription.update",
-        "industrial_bus.system.v1.SubscriptionUpdate", update,
-        options_.auth_token);
+        source, std::string(topics::kSubscriptionUpdateInput.name),
+        std::string(topics::kSubscriptionUpdateInput.payload_type), update,
+        {});
     const auto sent = connection->send(transport::ByteView(frame));
     return sent ? Result<void>::success() : Result<void>::failure(fromTransport(sent.error()));
 }
@@ -450,8 +456,9 @@ Result<void> TransportRuntimeAdapter::sendHeartbeat(
     const SourceIdentity source{options_.node_id, options_.service_name,
                                 options_.instance_id};
     const auto frame = serializeSystemEnvelope(
-        source, "system.heartbeat", "industrial_bus.system.v1.Heartbeat",
-        heartbeat, options_.auth_token, message_id, envelope::HEARTBEAT);
+        source, std::string(topics::kHeartbeatInput.name),
+        std::string(topics::kHeartbeatInput.payload_type),
+        heartbeat, {}, message_id, envelope::HEARTBEAT);
     const auto sent = connection->send(transport::ByteView(frame));
     return sent ? Result<void>::success()
                 : Result<void>::failure(fromTransport(sent.error()));
@@ -555,17 +562,18 @@ bool TransportRuntimeAdapter::disconnectFromHeartbeat(
 }
 
 void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
-    envelope::MessageEnvelope wire;
-    if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
+    auto validated = protocol_validator_.validate(frame);
+    if (!validated) {
         return;
     }
+    const auto& wire = validated.value().wire;
     std::string registration_message_id;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         registration_message_id = registration_message_id_;
     }
-    if (wire.topic() == "system.service.register" &&
-        wire.payload_type() == "industrial_bus.system.v1.ServiceRegistrationAck") {
+    if (wire.topic() == topics::kServiceRegisterAck.name &&
+        wire.payload_type() == topics::kServiceRegisterAck.payload_type) {
         system_proto::ServiceRegistrationAck ack;
         if (ack.ParseFromString(wire.payload()) &&
             wire.causation_id() == registration_message_id &&
@@ -596,9 +604,8 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
         return;
     }
 
-    if (wire.topic() == "system.service.directory" &&
-        wire.payload_type() ==
-            "industrial_bus.system.v1.ServiceDirectoryUpdate") {
+    if (wire.topic() == topics::kServiceDirectory.name &&
+        wire.payload_type() == topics::kServiceDirectory.payload_type) {
         system_proto::ServiceDirectoryUpdate update;
         if (!update.ParseFromString(wire.payload()) || !update.has_service()) {
             return;
@@ -627,8 +634,8 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
         return;
     }
 
-    if (wire.topic() == "system.heartbeat" &&
-        wire.payload_type() == "industrial_bus.system.v1.HeartbeatAck") {
+    if (wire.topic() == topics::kHeartbeatAck.name &&
+        wire.payload_type() == topics::kHeartbeatAck.payload_type) {
         system_proto::HeartbeatAck ack;
         std::lock_guard<std::mutex> lock(mutex_);
         const auto pending = pending_heartbeats_.find(wire.causation_id());
@@ -645,7 +652,7 @@ void TransportRuntimeAdapter::receive(transport::ByteBuffer frame) {
         return;
     }
 
-    auto decoded = decodeInbound(frame);
+    auto decoded = decodeInbound(frame, protocol_validator_);
     if (!decoded) {
         return;
     }

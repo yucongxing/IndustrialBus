@@ -3,6 +3,7 @@
 #include "industrial_bus/ids.h"
 #include "industrial_bus/qos.h"
 #include "industrial_bus/runtime/envelope_codec.h"
+#include "industrial_bus/topics.generated.h"
 
 #include "envelope.pb.h"
 #include "system.pb.h"
@@ -109,6 +110,7 @@ system_proto::ErrorCategory errorCategory(commhub::HubErrorCode code) {
         case commhub::HubErrorCode::service_already_registered:
             return system_proto::SERVICE_ALREADY_REGISTERED;
         case commhub::HubErrorCode::resource_exhausted: return system_proto::RESOURCE_EXHAUSTED;
+        case commhub::HubErrorCode::protocol_error: return system_proto::PROTOCOL_ERROR;
         case commhub::HubErrorCode::session_not_found:
         case commhub::HubErrorCode::none: return system_proto::PROTOCOL_ERROR;
     }
@@ -137,7 +139,8 @@ CommHubServer::CommHubServer(std::shared_ptr<transport::IListener> listener,
       hub_instance_id_(hub_instance_id.empty() ? generateUuidV4()
                                                 : std::move(hub_instance_id)),
       auth_token_(std::move(auth_token)),
-      options_(options) {}
+      options_(options),
+      protocol_validator_(options_.topic_catalog, options_.protocol_limits) {}
 
 CommHubServer::~CommHubServer() { stop(); }
 
@@ -265,11 +268,15 @@ void CommHubServer::accept(std::shared_ptr<transport::IConnection> connection) {
 
 void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
                             transport::ByteBuffer frame) {
-    envelope::MessageEnvelope wire;
-    if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
+    auto validated = protocol_validator_.validate(frame);
+    if (!validated) {
+        sendRouteError(peer, frame,
+                       {commhub::HubErrorCode::protocol_error,
+                        validated.error().message});
         return;
     }
-    if (wire.topic() == "system.service.register") {
+    const auto& wire = validated.value().wire;
+    if (wire.topic() == topics::kServiceRegisterInput.name) {
         const auto status = registerPeer(peer, frame);
         if (!status) {
             sendRouteError(peer, frame,
@@ -278,7 +285,7 @@ void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
         }
         return;
     }
-    if (wire.topic() == "system.subscription.update") {
+    if (wire.topic() == topics::kSubscriptionUpdateInput.name) {
         const auto status = updateSubscription(peer, frame);
         if (!status) {
             sendRouteError(peer, frame,
@@ -287,11 +294,11 @@ void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
         }
         return;
     }
-    if (wire.topic() == "system.service.disconnect") {
+    if (wire.topic() == topics::kServiceDisconnect.name) {
         (void)disconnectPeer(peer, frame);
         return;
     }
-    if (wire.topic() == "system.heartbeat" ||
+    if (wire.topic() == topics::kHeartbeatInput.name ||
         wire.message_type() == envelope::HEARTBEAT) {
         const auto status = handleHeartbeat(peer, frame);
         if (!status) {
@@ -307,7 +314,7 @@ void CommHubServer::receive(const std::shared_ptr<Peer>& peer,
                         "connection is not registered"});
         return;
     }
-    auto route = decodeRouteMessage(frame);
+    auto route = decodeRouteMessage(frame, protocol_validator_);
     if (!route) {
         sendRouteError(peer, frame,
                        {commhub::HubErrorCode::invalid_argument,
@@ -393,7 +400,7 @@ Result<void> CommHubServer::registerPeer(const std::shared_ptr<Peer>& peer,
         setDescriptor(ack.add_services(), instance.registration);
     }
     const auto reply = serializeReply(
-        wire, "industrial_bus.system.v1.ServiceRegistrationAck",
+        wire, std::string(topics::kServiceRegisterAck.payload_type),
         envelope::RESPONSE_OUTPUT, ack, "commhub", hub_instance_id_);
     const auto sent = peer->connection->send(transport::ByteView(reply));
     if (sent) {
@@ -444,8 +451,8 @@ void CommHubServer::broadcastDirectoryChange(
                                : system_proto::ServiceDirectoryUpdate::REMOVED);
     setDescriptor(update.mutable_service(), service);
     const auto frame = serializeSystemMessage(
-        "system.service.directory",
-        "industrial_bus.system.v1.ServiceDirectoryUpdate", update,
+        std::string(topics::kServiceDirectory.name),
+        std::string(topics::kServiceDirectory.payload_type), update,
         hub_instance_id_);
     std::vector<std::shared_ptr<Peer>> peers;
     {
@@ -489,14 +496,14 @@ Result<void> CommHubServer::handleHeartbeat(
     envelope::MessageEnvelope wire;
     system_proto::Heartbeat heartbeat;
     if (!wire.ParseFromArray(frame.data(), static_cast<int>(frame.size())) ||
-        wire.topic() != "system.heartbeat" ||
+        wire.topic() != topics::kHeartbeatInput.name ||
         wire.message_type() != envelope::HEARTBEAT ||
         wire.payload_role() != envelope::SYSTEM_PAYLOAD ||
-        wire.payload_type() != "industrial_bus.system.v1.Heartbeat" ||
+        wire.payload_type() != topics::kHeartbeatInput.payload_type ||
         !heartbeat.ParseFromString(wire.payload()) || heartbeat.sequence() == 0) {
         return Error::protocol("invalid Heartbeat");
     }
-    auto route = decodeRouteMessage(frame);
+    auto route = decodeRouteMessage(frame, protocol_validator_);
     if (!route) {
         return route.error();
     }
@@ -514,7 +521,7 @@ Result<void> CommHubServer::handleHeartbeat(
     ack.set_sequence(heartbeat.sequence());
     ack.set_hub_instance_id(hub_instance_id_);
     const auto reply = serializeReply(
-        wire, "industrial_bus.system.v1.HeartbeatAck",
+        wire, std::string(topics::kHeartbeatAck.payload_type),
         envelope::SYSTEM_PAYLOAD, ack, "commhub", hub_instance_id_);
     const auto sent = peer->connection->send(transport::ByteView(reply));
     return sent ? Result<void>::success()
@@ -627,6 +634,12 @@ void CommHubServer::sendRouteError(const std::shared_ptr<Peer>& peer,
                                    const commhub::HubError& error) {
     envelope::MessageEnvelope wire;
     if (!wire.ParseFromArray(request.data(), static_cast<int>(request.size()))) {
+        return;
+    }
+    if (wire.message_id().empty() || wire.correlation_id().empty() ||
+        wire.source_service().empty() || wire.source_instance().empty() ||
+        options_.topic_catalog.find(wire.topic(), MessageType::Reply,
+                                    CatalogPayloadRole::ErrorDetail) == nullptr) {
         return;
     }
     system_proto::Error detail;

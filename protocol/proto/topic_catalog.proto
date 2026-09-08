@@ -1,0 +1,39 @@
+syntax = "proto3";
+
+package industrial_bus.catalog.v1;
+
+import "envelope.proto";
+
+option optimize_for = SPEED;
+
+enum ParameterConstraint {
+  PARAMETER_CONSTRAINT_UNSPECIFIED = 0;
+  UUID = 1;
+}
+
+enum ProtocolValidatorKind {
+  PROTOCOL_VALIDATOR_NONE = 0;
+  OPERATION_PROGRESS_ID = 1;
+}
+
+message TopicParameter {
+  string name = 1;
+  ParameterConstraint constraint = 2;
+}
+
+message TopicBinding {
+  string symbol = 1;
+  string topic_pattern = 2;
+  industrial_bus.protocol.v1.MessageType message_type = 3;
+  industrial_bus.protocol.v1.PayloadRole payload_role = 4;
+  string payload_type = 5;
+  uint32 schema_major = 6;
+  uint64 max_payload_bytes = 7;
+  repeated TopicParameter parameters = 8;
+  ProtocolValidatorKind validator = 9;
+}
+
+message TopicCatalog {
+  uint32 catalog_version = 1;
+  repeated TopicBinding bindings = 2;
+}

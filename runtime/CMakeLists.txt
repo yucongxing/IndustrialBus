@@ -37,6 +37,30 @@ if(INDUSTRIAL_BUS_BUILD_TESTS)
     industrial_bus_target_defaults(industrial_bus_runtime_heartbeat_test)
     gtest_discover_tests(industrial_bus_runtime_heartbeat_test
         PROPERTIES TIMEOUT 5)
+
+    add_executable(industrial_bus_protocol_validation_test
+        tests/protocol_validation_test.cpp)
+    target_link_libraries(industrial_bus_protocol_validation_test
+        PRIVATE IndustrialBus::Runtime IndustrialBus::TransportLoopback
+                GTest::gtest_main)
+    industrial_bus_target_defaults(industrial_bus_protocol_validation_test)
+    gtest_discover_tests(industrial_bus_protocol_validation_test)
+
+    add_executable(industrial_bus_topic_catalog_test
+        tests/topic_catalog_test.cpp)
+    target_link_libraries(industrial_bus_topic_catalog_test
+        PRIVATE IndustrialBus::Runtime GTest::gtest_main)
+    industrial_bus_target_defaults(industrial_bus_topic_catalog_test)
+    gtest_discover_tests(industrial_bus_topic_catalog_test)
+
+    add_executable(industrial_bus_protocol_validation_e2e_test
+        tests/protocol_validation_e2e_test.cpp)
+    target_link_libraries(industrial_bus_protocol_validation_e2e_test
+        PRIVATE IndustrialBus::Runtime IndustrialBus::TransportLoopback
+                GTest::gtest_main)
+    industrial_bus_target_defaults(
+        industrial_bus_protocol_validation_e2e_test)
+    gtest_discover_tests(industrial_bus_protocol_validation_e2e_test)
 endif()
 
 if(INDUSTRIAL_BUS_ENABLE_ZEROMQ)

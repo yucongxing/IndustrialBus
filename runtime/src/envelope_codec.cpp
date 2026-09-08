@@ -246,41 +246,26 @@ Result<WireSemantics> readSemantics(const envelope::MessageEnvelope& wire) {
     return WireSemantics{message_type.value(), message_class, canonical_priority};
 }
 
-Result<envelope::MessageEnvelope> parseEnvelope(const transport::ByteBuffer& frame) {
-    envelope::MessageEnvelope message;
-    if (frame.size() > static_cast<std::size_t>(INT32_MAX) ||
-        !message.ParseFromArray(frame.data(), static_cast<int>(frame.size()))) {
-        return Error::protocol("invalid MessageEnvelope frame");
+Result<envelope::MessageEnvelope> parseEnvelope(
+    const transport::ByteBuffer& frame,
+    const ProtocolValidator& validator) {
+    auto validated = validator.validate(frame);
+    if (!validated) {
+        return validated.error();
     }
-    if (message.message_id().empty() || message.topic().empty()) {
-        return Error::protocol("MessageEnvelope requires message_id and topic");
-    }
-    const auto semantics = readSemantics(message);
-    if (!semantics) {
-        return semantics.error();
-    }
-    if (message.topic() == "system.operation.progress") {
-        if (semantics.value().message_class != MessageClass::Progress ||
-            message.payload_type() !=
-                operation_proto::ProgressEvent::descriptor()->full_name()) {
-            return Error::protocol(
-                "operation progress requires the canonical ProgressEvent contract");
-        }
-        operation_proto::ProgressEvent progress;
-        if (!progress.ParseFromString(message.payload()) ||
-            message.operation_id().empty() ||
-            progress.operation_id() != message.operation_id()) {
-            return Error::protocol(
-                "ProgressEvent operation_id must match its Envelope");
-        }
-    }
-    return message;
+    return std::move(validated.value().wire);
 }
 
 }  // namespace
 
 Result<transport::ByteBuffer> encodeOutbound(const client::OutboundMessage& message,
                                              const SourceIdentity& source) {
+    return encodeOutbound(message, source, productionProtocolValidator());
+}
+
+Result<transport::ByteBuffer> encodeOutbound(const client::OutboundMessage& message,
+                                             const SourceIdentity& source,
+                                             const ProtocolValidator& validator) {
     if (message.message_id.empty() || message.topic.empty() ||
         message.payload_type.empty() || source.service_name.empty() ||
         source.instance_id.empty()) {
@@ -350,11 +335,22 @@ Result<transport::ByteBuffer> encodeOutbound(const client::OutboundMessage& mess
     if (!wire.SerializeToString(&serialized)) {
         return Error::protocol("failed to serialize MessageEnvelope");
     }
-    return transport::ByteBuffer(serialized.begin(), serialized.end());
+    transport::ByteBuffer frame(serialized.begin(), serialized.end());
+    const auto validated = validator.validate(frame);
+    if (!validated) {
+        return validated.error();
+    }
+    return frame;
 }
 
 Result<client::InboundMessage> decodeInbound(const transport::ByteBuffer& frame) {
-    auto parsed = parseEnvelope(frame);
+    return decodeInbound(frame, productionProtocolValidator());
+}
+
+Result<client::InboundMessage> decodeInbound(
+    const transport::ByteBuffer& frame,
+    const ProtocolValidator& validator) {
+    auto parsed = parseEnvelope(frame, validator);
     if (!parsed) {
         return parsed.error();
     }
@@ -392,7 +388,13 @@ Result<client::InboundMessage> decodeInbound(const transport::ByteBuffer& frame)
 }
 
 Result<commhub::RouteMessage> decodeRouteMessage(const transport::ByteBuffer& frame) {
-    auto parsed = parseEnvelope(frame);
+    return decodeRouteMessage(frame, productionProtocolValidator());
+}
+
+Result<commhub::RouteMessage> decodeRouteMessage(
+    const transport::ByteBuffer& frame,
+    const ProtocolValidator& validator) {
+    auto parsed = parseEnvelope(frame, validator);
     if (!parsed) {
         return parsed.error();
     }

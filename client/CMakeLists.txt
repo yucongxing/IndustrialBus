@@ -4,6 +4,8 @@ endif()
 
 add_library(industrial_bus_client STATIC
     ../runtime/src/envelope_codec.cpp
+    ../runtime/src/protocol_validation.cpp
+    ../runtime/src/topic_catalog.cpp
     ../runtime/src/transport_runtime_adapter.cpp
     src/bus_client.cpp
     src/default_executor.cpp

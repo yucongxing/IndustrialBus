@@ -2,6 +2,7 @@
 
 #include "industrial_bus/commhub/hub_core.h"
 #include "industrial_bus/result.h"
+#include "industrial_bus/runtime/protocol_validation.h"
 #include "industrial_bus/transport/transport.h"
 
 #include <chrono>
@@ -18,6 +19,8 @@ namespace industrial_bus::runtime {
 struct CommHubServerOptions {
     std::chrono::milliseconds heartbeat_timeout{std::chrono::seconds(6)};
     std::chrono::milliseconds sweep_interval{std::chrono::milliseconds(500)};
+    ProtocolLimits protocol_limits{};
+    TopicCatalogView topic_catalog{productionTopicCatalog()};
 };
 
 class CommHubServer {
@@ -62,6 +65,7 @@ private:
     std::string hub_instance_id_;
     std::string auth_token_;
     CommHubServerOptions options_;
+    ProtocolValidator protocol_validator_;
     commhub::HubCore core_;
     std::mutex lifecycle_mutex_;
     std::mutex mutex_;

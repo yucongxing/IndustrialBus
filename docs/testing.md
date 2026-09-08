@@ -31,5 +31,12 @@ prefix, configures a separate consumer using only
 Protocol, verifies the installed CommHub path, and runs the consumer. This
 guards against accidentally exporting build-tree include or library paths.
 
-Current gaps are protocol compatibility fixtures, dedicated Integration helper
-tests, failure injection, and stress/soak coverage.
+Protocol tests validate Topic Catalog generation/freshness, Envelope limits and
+cross-field contracts, zero-side-effect Hub rejection, released descriptor and
+catalog compatibility, historical binary fixtures, and Protobuf unknown-field
+round trips. See
+[Topic Catalog and protocol validation](topic-catalog-protocol-validation.md)
+for regeneration and baseline-update commands.
+
+Current gaps are dedicated Integration helper tests, broader failure injection,
+and stress/soak coverage.

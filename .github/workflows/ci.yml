@@ -26,5 +26,5 @@ jobs:
       - name: Build
         run: cmake --build --preset debug --parallel 2
 
-      - name: Test
-        run: ctest --preset debug
+      - name: Test protocol, compatibility, and runtime contracts
+        run: ctest --preset debug --no-tests=error

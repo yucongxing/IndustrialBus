@@ -142,7 +142,7 @@ install(FILES
     "${CMAKE_CURRENT_BINARY_DIR}/IndustrialBusConfigVersion.cmake"
     DESTINATION ${INDUSTRIAL_BUS_INSTALL_CMAKEDIR})
 
-if(INDUSTRIAL_BUS_BUILD_TESTS)
+if(INDUSTRIAL_BUS_BUILD_TESTS AND INDUSTRIAL_BUS_ENABLE_PROTOBUF)
     configure_file(
         cmake/tests/install_consumer_test.cmake.in
         "${CMAKE_CURRENT_BINARY_DIR}/install_consumer_test.cmake"

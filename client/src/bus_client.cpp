@@ -5,6 +5,7 @@
 #include "industrial_bus/client/runtime_adapter.h"
 #include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
+#include "industrial_bus/topics.generated.h"
 
 #include "operation.pb.h"
 #include "system.pb.h"
@@ -932,7 +933,7 @@ Result<void> BusClient::reportOperation(OperationUpdate update,
     message.correlation_id = correlation_id.empty() ? generateUuidV4()
                                                      : std::move(correlation_id);
     message.operation_id = update.operation_id;
-    message.topic = "system.operation.event";
+    message.topic = std::string(topics::kOperationEvent.name);
     message.payload_type = operation::v1::OperationEvent::descriptor()->full_name();
     message.operation = std::make_shared<OperationUpdate>(std::move(update));
     return impl_->adapter->send(std::move(message));
@@ -983,7 +984,7 @@ Result<void> BusClient::reportProgress(OperationUpdate update,
     message.correlation_id = correlation_id.empty() ? generateUuidV4()
                                                      : std::move(correlation_id);
     message.operation_id = update.operation_id;
-    message.topic = "system.operation.progress";
+    message.topic = std::string(topics::kOperationProgress.name);
     message.payload_type =
         operation::v1::ProgressEvent::descriptor()->full_name();
     message.payload = std::move(payload);

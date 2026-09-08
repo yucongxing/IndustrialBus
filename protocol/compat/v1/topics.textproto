@@ -1,0 +1,27 @@
+catalog_version: 1
+
+bindings { symbol: "kServiceRegisterInput" topic_pattern: "system.service.register" message_type: SYSTEM payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.ServiceRegistration" schema_major: 1 max_payload_bytes: 65536 }
+bindings { symbol: "kServiceRegisterAck" topic_pattern: "system.service.register" message_type: REPLY payload_role: RESPONSE_OUTPUT payload_type: "industrial_bus.system.v1.ServiceRegistrationAck" schema_major: 1 max_payload_bytes: 262144 }
+bindings { symbol: "kServiceRegisterError" topic_pattern: "system.service.register" message_type: REPLY payload_role: ERROR_DETAIL payload_type: "industrial_bus.system.v1.Error" schema_major: 1 max_payload_bytes: 65536 }
+
+bindings { symbol: "kSubscriptionUpdateInput" topic_pattern: "system.subscription.update" message_type: SYSTEM payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.SubscriptionUpdate" schema_major: 1 max_payload_bytes: 4096 }
+bindings { symbol: "kSubscriptionUpdateAck" topic_pattern: "system.subscription.update" message_type: REPLY payload_role: RESPONSE_OUTPUT payload_type: "industrial_bus.system.v1.SubscriptionAck" schema_major: 1 max_payload_bytes: 4096 }
+bindings { symbol: "kSubscriptionUpdateError" topic_pattern: "system.subscription.update" message_type: REPLY payload_role: ERROR_DETAIL payload_type: "industrial_bus.system.v1.Error" schema_major: 1 max_payload_bytes: 65536 }
+
+bindings { symbol: "kServiceDisconnect" topic_pattern: "system.service.disconnect" message_type: SYSTEM payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.ServiceDisconnected" schema_major: 1 max_payload_bytes: 16384 }
+bindings { symbol: "kServiceDirectory" topic_pattern: "system.service.directory" message_type: SYSTEM payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.ServiceDirectoryUpdate" schema_major: 1 max_payload_bytes: 65536 }
+
+bindings { symbol: "kHeartbeatInput" topic_pattern: "system.heartbeat" message_type: HEARTBEAT payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.Heartbeat" schema_major: 1 max_payload_bytes: 1024 }
+bindings { symbol: "kHeartbeatAck" topic_pattern: "system.heartbeat" message_type: REPLY payload_role: SYSTEM_PAYLOAD payload_type: "industrial_bus.system.v1.HeartbeatAck" schema_major: 1 max_payload_bytes: 4096 }
+bindings { symbol: "kHeartbeatError" topic_pattern: "system.heartbeat" message_type: REPLY payload_role: ERROR_DETAIL payload_type: "industrial_bus.system.v1.Error" schema_major: 1 max_payload_bytes: 65536 }
+
+bindings { symbol: "kOperationEvent" topic_pattern: "system.operation.event" message_type: EVENT payload_role: EVENT_FACT payload_type: "industrial_bus.operation.v1.OperationEvent" schema_major: 1 max_payload_bytes: 262144 }
+bindings { symbol: "kOperationProgress" topic_pattern: "system.operation.progress" message_type: PROGRESS payload_role: EVENT_FACT payload_type: "industrial_bus.operation.v1.ProgressEvent" schema_major: 1 max_payload_bytes: 262144 validator: OPERATION_PROGRESS_ID }
+
+bindings { symbol: "kRunSimulationInput" topic_pattern: "cmp.channel.{channel_uuid}.simulation.run" message_type: COMMAND payload_role: COMMAND_INPUT payload_type: "industrial_bus.cmp.v1.RunSimulation" schema_major: 1 max_payload_bytes: 1048576 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kRunSimulationAck" topic_pattern: "cmp.channel.{channel_uuid}.simulation.run" message_type: REPLY payload_role: COMMAND_ACK payload_type: "industrial_bus.system.v1.CommandAck" schema_major: 1 max_payload_bytes: 65536 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kRunSimulationError" topic_pattern: "cmp.channel.{channel_uuid}.simulation.run" message_type: REPLY payload_role: ERROR_DETAIL payload_type: "industrial_bus.system.v1.Error" schema_major: 1 max_payload_bytes: 65536 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kSimulationProgress" topic_pattern: "cmp.channel.{channel_uuid}.simulation.progress" message_type: PROGRESS payload_role: EVENT_FACT payload_type: "industrial_bus.cmp.v1.SimulationProgress" schema_major: 1 max_payload_bytes: 262144 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kSimulationCompleted" topic_pattern: "cmp.channel.{channel_uuid}.simulation.completed" message_type: EVENT payload_role: EVENT_FACT payload_type: "industrial_bus.cmp.v1.SimulationCompleted" schema_major: 1 max_payload_bytes: 262144 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kSimulationFailed" topic_pattern: "cmp.channel.{channel_uuid}.simulation.failed" message_type: EVENT payload_role: EVENT_FACT payload_type: "industrial_bus.cmp.v1.SimulationFailed" schema_major: 1 max_payload_bytes: 262144 parameters { name: "channel_uuid" constraint: UUID } }
+bindings { symbol: "kApplicationLog" topic_pattern: "application.log.{channel_uuid}" message_type: LOG payload_role: EVENT_FACT payload_type: "industrial_bus.logging.v1.LogEvent" schema_major: 1 max_payload_bytes: 262144 parameters { name: "channel_uuid" constraint: UUID } }

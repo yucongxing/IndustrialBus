@@ -27,4 +27,11 @@ struct RequestTopic {
     std::string_view response_type;
 };
 
+template <typename Payload>
+struct SystemTopic {
+    std::string_view name;
+    std::string_view payload_type;
+    MessageType message_type{MessageType::System};
+};
+
 }  // namespace industrial_bus
