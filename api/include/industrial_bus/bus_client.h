@@ -6,6 +6,7 @@
 #include "industrial_bus/future.h"
 #include "industrial_bus/operation.h"
 #include "industrial_bus/payload_codec.h"
+#include "industrial_bus/qos.h"
 #include "industrial_bus/result.h"
 #include "industrial_bus/subscription.h"
 #include "industrial_bus/topic.h"
@@ -17,6 +18,7 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <optional>
 #include <string>
 #include <type_traits>
 #include <utility>
@@ -27,6 +29,7 @@ struct PublishOptions {
     std::string correlation_id;
     std::string causation_id;
     std::string operation_id;
+    std::optional<MessageClass> message_class;
 };
 
 struct CommandOptions {
@@ -63,7 +66,7 @@ public:
             return Error::protocol("failed to serialize event payload");
         }
         return publishRaw(std::string(topic.name), std::string(topic.payload_type),
-                          std::move(bytes), std::move(options));
+                          std::move(bytes), std::move(options), topic.message_class);
     }
 
     template <typename Event, typename Handler>
@@ -197,12 +200,15 @@ public:
     ServiceSnapshot services() const;
     Result<void> reportOperation(OperationUpdate update,
                                  std::string correlation_id = {});
+    Result<void> reportProgress(OperationUpdate update,
+                                std::string correlation_id = {});
 
     // Used by integration helpers. Applications normally use typed methods above.
     Result<void> publishRaw(std::string topic,
                             std::string payload_type,
                             ByteBuffer payload,
-                            PublishOptions options = {});
+                            PublishOptions options = {},
+                            MessageClass topic_class = MessageClass::Event);
 
 private:
     using RawCompletion = std::function<void(Result<ByteBuffer>)>;

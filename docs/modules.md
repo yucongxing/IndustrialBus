@@ -78,7 +78,11 @@ or maintain sessions.
 Owns the `BusClient` implementation and process-local singleton, callback
 executor, pending request deadlines and late replies, subscription reference
 counts, typed request/command handlers, and durable command acceptance through
-the idempotency journal. `ClientOptions::instance_mode` defaults to
+the idempotency journal. It derives canonical `MessageType`, `MessageClass`, and
+priority metadata for every SDK-controlled path. Ordinary two-field
+`EventTopic` publications remain source compatible and default to `EVENT/P2`;
+publishers may explicitly select Progress, final-state Event, or Log severity.
+`ClientOptions::instance_mode` defaults to
 `SingletonPerUser`; `MultiInstance` permits distinct `instance_id` values for
 the same service name. `BusClient::services()` exposes the runtime's current
 directory snapshot. On Linux Client also owns endpoint/token discovery,
@@ -101,7 +105,10 @@ to avoid a Client/Runtime target cycle.
 
 Owns thin application helpers: `OperationGuard`/thread-local operation context
 and `ProgressThrottle`. These helpers publish lifecycle state and coalesce
-progress without owning BusClient or transport lifetime.
+progress without owning transport lifetime. Lifecycle transitions use
+`OperationEvent` on `system.operation.event` (`EVENT/P2`, or `EVENT/P0` when
+terminal), while progress uses `ProgressEvent` on `system.operation.progress`
+(`PROGRESS/P2`).
 
 It does not execute algorithms or currently provide Qt executor and logger
 adapters.
@@ -114,7 +121,11 @@ adapters.
 Owns the transport- and codec-independent Hub state machine: session and service
 registries, subscriptions, request return routes, message routing, QoS queues,
 heartbeat timestamps, and race-safe session expiry that cleans all related
-state.
+state. Each destination has one aggregate bounded semantic queue (default 1152
+messages): it schedules P0 before P1 before P2 before P3, coalesces Progress by
+operation, evicts lower-value droppable traffic, rejects unadmittable P1, and
+isolates a destination on P0 overflow. One slow broadcast subscriber cannot
+suppress delivery to another subscriber.
 
 It does not parse Protobuf, validate tokens, bind sockets, start processes,
 persist messages, or implement cross-node routing.
@@ -135,12 +146,17 @@ subscriptions, transmits Heartbeats, validates HeartbeatAck, and enforces Hub
 liveness timeout.
 Server-side `CommHubServer` authenticates registration, maps peers to sessions,
 validates and acknowledges heartbeats, routes frames, drains outbound queues,
-and periodically expires stale sessions. Runtime also builds the `commhub`
+and periodically expires stale sessions. It preserves all supported wire
+MessageTypes, validates canonical priorities and the reserved
+`industrial_bus.message_class` header, and applies a safe derived default to
+legacy header-less Envelopes. A send failure disconnects only that destination;
+the popped frame is not retried. Runtime also builds the `commhub`
 process.
 
 It does not define business APIs or algorithms, implement XDG file primitives,
 or implement the ZeroMQ backend. Durable broker storage, cross-node operation,
-and the Linux automatic reconnect supervisor remain future work.
+the Linux automatic reconnect supervisor, finite message retries, and
+status-query compensation remain future work.
 
 - Target: `industrial_bus_runtime` / `IndustrialBus::Runtime`
 - Executable: conditional `commhub`

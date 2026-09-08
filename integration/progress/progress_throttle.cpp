@@ -1,5 +1,7 @@
 #include "industrial_bus/progress.h"
 
+#include "industrial_bus/bus_client.h"
+
 #include <algorithm>
 #include <cmath>
 #include <condition_variable>
@@ -162,6 +164,19 @@ ProgressThrottle::ProgressThrottle(std::string operation_id,
     : impl_(std::make_unique<Impl>(std::move(operation_id),
                                    std::move(operation_type), std::move(sink),
                                    options)) {}
+
+ProgressThrottle::ProgressThrottle(BusClient& bus,
+                                   std::string operation_id,
+                                   std::string operation_type,
+                                   std::string correlation_id,
+                                   ProgressThrottleOptions options)
+    : ProgressThrottle(
+          std::move(operation_id), std::move(operation_type),
+          [&bus, correlation_id = std::move(correlation_id)](
+              OperationUpdate update) {
+              return bus.reportProgress(std::move(update), correlation_id);
+          },
+          options) {}
 
 ProgressThrottle::~ProgressThrottle() = default;
 

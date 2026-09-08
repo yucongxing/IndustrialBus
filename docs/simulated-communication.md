@@ -75,13 +75,13 @@ The application-facing interfaces are:
 
 For channel UUID `<c>`, the owned Topics are:
 
-| Topic | Protobuf payload | Direction | Meaning |
-|---|---|---|---|
-| `cmp.channel.<c>.simulation.run` | `RunSimulation` | LayoutView to exact CMPSuite | Submit a durable, idempotent simulation Command |
-| `cmp.channel.<c>.simulation.progress` | `SimulationProgress` | CMPSuite to channel subscribers | Report non-terminal progress |
-| `cmp.channel.<c>.simulation.completed` | `SimulationCompleted` | CMPSuite to channel subscribers | Report a successful terminal result |
-| `cmp.channel.<c>.simulation.failed` | `SimulationFailed` | CMPSuite to channel subscribers | Report a failed terminal result |
-| `application.log.<c>` | `LogEvent` | Either channel participant to subscribers | Publish best-effort diagnostic logs |
+| Topic | Protobuf payload | Wire semantics | Direction | Meaning |
+|---|---|---|---|---|
+| `cmp.channel.<c>.simulation.run` | `RunSimulation` | `COMMAND/P1` | LayoutView to exact CMPSuite | Submit a durable, idempotent simulation Command |
+| `cmp.channel.<c>.simulation.progress` | `SimulationProgress` | `PROGRESS/P2` | CMPSuite to channel subscribers | Report non-terminal progress |
+| `cmp.channel.<c>.simulation.completed` | `SimulationCompleted` | `EVENT/P0` | CMPSuite to channel subscribers | Report a successful terminal result |
+| `cmp.channel.<c>.simulation.failed` | `SimulationFailed` | `EVENT/P0` | CMPSuite to channel subscribers | Report a failed terminal result |
+| `application.log.<c>` | `LogEvent` | `LOG/P2` for warning/error, `LOG/P3` for info/debug | Either channel participant to subscribers | Publish diagnostic logs |
 
 `CommandAck` is the standard reply type for the run Topic. It means the
 Command was durably accepted and assigned to an owner. It does **not** mean the
@@ -126,14 +126,14 @@ sequenceDiagram
     loop Five simulated steps
         CMP->>CMP: Sleep 150 ms
         CMP->>CMPB: reportProgress()
-        CMPB->>HUB: SimulationProgress Event
+        CMPB->>HUB: SimulationProgress (PROGRESS/P2)
         HUB-->>LVB: Forward to current channel subscribers
         LVB-->>LV: Filter by operation_id and log
     end
 
     CMP->>CMPB: complete(result URI)
     CMPB->>J: Persist Completed
-    CMPB->>HUB: SimulationCompleted Event
+    CMPB->>HUB: SimulationCompleted (EVENT/P0)
     HUB-->>LVB: Broadcast Completed
     LVB->>LVB: Store result and notify waiter
     LVB-->>LV: runSimulation() returns success
@@ -205,6 +205,11 @@ The sending BusClient serializes `RunSimulation` and places it in an Envelope
 containing the message ID, correlation ID, operation ID, destination, Topic,
 payload type, idempotency key, and absolute deadline.
 
+Every new Envelope also carries its canonical numeric priority and the reserved
+`industrial_bus.message_class` header. CommHub accepts a valid legacy Envelope
+without this header by deriving a safe class and effective priority from its
+MessageType and payload role.
+
 CommHub does not parse or execute CMP business data. It:
 
 1. validates the authenticated LayoutView session;
@@ -215,6 +220,16 @@ CommHub does not parse or execute CMP business data. It:
 
 The saved return route allows the subsequent `CommandAck` or error reply to be
 sent back to the correct LayoutView session.
+
+CommHub queues traffic independently per destination. Progress for the same
+operation is coalesced before overflow handling. A full queue evicts eligible
+lower-value logs/progress/events first; otherwise P2/P3 is dropped, P1 is
+rejected with resource exhaustion, and P0 disconnects only the slow consumer.
+The same broadcast is still evaluated for every healthy subscriber.
+
+This flow deliberately does not add message retries or status-query
+compensation. A frame popped for a transport send that fails is not replayed;
+finite retry and state-query recovery belong to a separate change.
 
 ## 5. Durable acceptance and duplicate handling
 

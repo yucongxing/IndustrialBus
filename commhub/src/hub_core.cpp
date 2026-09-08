@@ -74,10 +74,16 @@ RouteDecision HubCore::dispatch(const SessionId& source_session,
     if (!decision) {
         return decision;
     }
+    const bool broadcast = message.kind == MessageKind::event ||
+                           message.kind == MessageKind::progress ||
+                           message.kind == MessageKind::log;
     for (const auto& target : decision.targets) {
         auto enqueue = qos_.enqueue(target, message);
         if (enqueue.disposition == EnqueueDisposition::disconnect_slow_consumer) {
             disconnectUnlocked(target);
+            if (broadcast) {
+                continue;
+            }
             decision.status = enqueue.status;
             return decision;
         }

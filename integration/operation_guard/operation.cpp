@@ -82,7 +82,7 @@ Result<void> OperationGuard::reportProgress(std::string stage,
     update.stage_progress = stage_progress;
     update.overall_progress = overall_progress;
     update.start_time = start_time_;
-    return bus_->reportOperation(std::move(update), correlation_id_);
+    return bus_->reportProgress(std::move(update), correlation_id_);
 }
 
 Result<void> OperationGuard::requestCancellation() {

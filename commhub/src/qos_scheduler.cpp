@@ -1,29 +1,42 @@
 #include "industrial_bus/commhub/qos_scheduler.h"
 
-#include <algorithm>
-
 namespace industrial_bus::commhub {
 
 QoSScheduler::QoSScheduler(QoSConfig config) : config_(config) {}
 
-std::size_t QoSScheduler::level(const RouteMessage& message) {
-    if (message.kind == MessageKind::reply || message.kind == MessageKind::error ||
-        message.priority == 0) {
-        return 0;
+bool QoSScheduler::validSemantics(const RouteMessage& message) {
+    if (message.priority > static_cast<std::uint32_t>(QosPriority::BestEffort) ||
+        message.priority !=
+            static_cast<std::uint32_t>(defaultPriority(message.message_class))) {
+        return false;
     }
-    if (message.kind == MessageKind::command || message.kind == MessageKind::request ||
-        message.kind == MessageKind::system || message.priority == 1) {
-        return 1;
+    const auto expected = messageTypeFor(message.message_class);
+    switch (message.kind) {
+        case MessageKind::command: return expected == MessageType::Command;
+        case MessageKind::event: return expected == MessageType::Event;
+        case MessageKind::request: return expected == MessageType::Request;
+        case MessageKind::reply:
+            return expected == MessageType::Reply ||
+                   message.message_class == MessageClass::Error;
+        case MessageKind::progress: return expected == MessageType::Progress;
+        case MessageKind::error: return expected == MessageType::Error;
+        case MessageKind::log: return expected == MessageType::Log;
+        case MessageKind::heartbeat: return expected == MessageType::Heartbeat;
+        case MessageKind::system: return expected == MessageType::System;
     }
-    return std::min<std::size_t>(message.priority, 3);
+    return false;
 }
 
-std::size_t QoSScheduler::totalSize(const ConnectionQueue& queue) {
-    std::size_t total = 0;
-    for (const auto& level_queue : queue.queues) {
-        total += level_queue.size();
-    }
-    return total;
+QoSStats QoSScheduler::snapshot(const ConnectionQueue& connection) {
+    const auto stats = connection.queue.stats();
+    return QoSStats{stats.enqueued,
+                    stats.dequeued,
+                    stats.dropped,
+                    stats.coalesced,
+                    stats.rejected,
+                    connection.resource_exhausted,
+                    stats.critical_overflow,
+                    stats.high_watermark};
 }
 
 EnqueueResult QoSScheduler::enqueue(const SessionId& target, RouteMessage message) {
@@ -32,45 +45,45 @@ EnqueueResult QoSScheduler::enqueue(const SessionId& target, RouteMessage messag
                 HubStatus::failure(HubErrorCode::invalid_argument,
                                    "QoS target session is required")};
     }
-    const auto priority = level(message);
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto& connection = queues_[target];
-
-    if (message.kind == MessageKind::progress && !message.operation_id.empty()) {
-        auto& queue = connection.queues[priority];
-        const auto existing = std::find_if(queue.begin(), queue.end(), [&](const auto& queued) {
-            return queued.kind == MessageKind::progress &&
-                   queued.operation_id == message.operation_id;
-        });
-        if (existing != queue.end()) {
-            *existing = std::move(message);
-            ++connection.stats.progress_coalesced;
-            return {EnqueueDisposition::coalesced, HubStatus::success()};
-        }
+    if (!validSemantics(message)) {
+        return {EnqueueDisposition::rejected,
+                HubStatus::failure(HubErrorCode::invalid_argument,
+                                   "message QoS semantics are inconsistent")};
     }
-
-    auto& queue = connection.queues[priority];
-    if (queue.size() >= config_.capacity[priority]) {
-        if (priority == 0) {
-            ++connection.stats.critical_overflow;
+    std::lock_guard<std::mutex> lock(mutex_);
+    auto [found, inserted] = queues_.try_emplace(target);
+    if (inserted) {
+        found->second = std::make_unique<ConnectionQueue>(config_.capacity);
+    }
+    auto& connection = *found->second;
+    QueueMetadata metadata;
+    metadata.priority = static_cast<QosPriority>(message.priority);
+    metadata.message_class = message.message_class;
+    metadata.coalescing_key = message.operation_id;
+    const auto priority = metadata.priority;
+    const auto result = connection.queue.tryEnqueue(std::move(message),
+                                                    std::move(metadata));
+    switch (result) {
+        case ::industrial_bus::EnqueueDisposition::Enqueued:
+            return {EnqueueDisposition::accepted, HubStatus::success()};
+        case ::industrial_bus::EnqueueDisposition::Coalesced:
+            return {EnqueueDisposition::coalesced, HubStatus::success()};
+        case ::industrial_bus::EnqueueDisposition::CriticalOverflow:
             return {EnqueueDisposition::disconnect_slow_consumer,
                     HubStatus::failure(HubErrorCode::resource_exhausted,
                                        "critical queue exhausted")};
-        } else if (priority == 1) {
-            ++connection.stats.resource_exhausted;
-            return {EnqueueDisposition::rejected,
-                    HubStatus::failure(HubErrorCode::resource_exhausted,
-                                       "command/request queue exhausted")};
-        } else {
-            ++connection.stats.dropped;
+        case ::industrial_bus::EnqueueDisposition::Rejected:
+            if (priority == QosPriority::High) {
+                ++connection.resource_exhausted;
+                return {EnqueueDisposition::rejected,
+                        HubStatus::failure(HubErrorCode::resource_exhausted,
+                                           "command/request queue exhausted")};
+            }
             return {EnqueueDisposition::dropped, HubStatus::success()};
-        }
     }
-    queue.push_back(std::move(message));
-    ++connection.stats.enqueued;
-    connection.stats.high_watermark =
-        std::max(connection.stats.high_watermark, totalSize(connection));
-    return {EnqueueDisposition::accepted, HubStatus::success()};
+    return {EnqueueDisposition::rejected,
+            HubStatus::failure(HubErrorCode::invalid_argument,
+                               "unknown queue result")};
 }
 
 std::optional<RouteMessage> QoSScheduler::pop(const SessionId& target) {
@@ -79,14 +92,7 @@ std::optional<RouteMessage> QoSScheduler::pop(const SessionId& target) {
     if (found == queues_.end()) {
         return std::nullopt;
     }
-    for (auto& queue : found->second.queues) {
-        if (!queue.empty()) {
-            RouteMessage message = std::move(queue.front());
-            queue.pop_front();
-            return message;
-        }
-    }
-    return std::nullopt;
+    return found->second->queue.tryDequeue();
 }
 
 void QoSScheduler::remove(const SessionId& target) {
@@ -97,7 +103,7 @@ void QoSScheduler::remove(const SessionId& target) {
 QoSStats QoSScheduler::stats(const SessionId& target) const {
     std::lock_guard<std::mutex> lock(mutex_);
     const auto found = queues_.find(target);
-    return found == queues_.end() ? QoSStats{} : found->second.stats;
+    return found == queues_.end() ? QoSStats{} : snapshot(*found->second);
 }
 
 }  // namespace industrial_bus::commhub

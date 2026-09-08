@@ -11,6 +11,8 @@
 
 namespace industrial_bus {
 
+class BusClient;
+
 struct ProgressThrottleOptions {
     std::chrono::milliseconds minimum_interval{100};
     std::chrono::milliseconds maximum_silence{500};
@@ -24,6 +26,11 @@ public:
     ProgressThrottle(std::string operation_id,
                      std::string operation_type,
                      Sink sink,
+                     ProgressThrottleOptions options = {});
+    ProgressThrottle(BusClient& bus,
+                     std::string operation_id,
+                     std::string operation_type,
+                     std::string correlation_id = {},
                      ProgressThrottleOptions options = {});
     ~ProgressThrottle();
 

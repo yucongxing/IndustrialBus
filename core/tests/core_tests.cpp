@@ -2,10 +2,13 @@
 #include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
 #include "industrial_bus/operation_state.h"
+#include "industrial_bus/qos.h"
 #include "industrial_bus/result.h"
+#include "industrial_bus/topic.h"
 
 #include <gtest/gtest.h>
 
+#include <array>
 #include <atomic>
 #include <fcntl.h>
 #include <set>
@@ -21,8 +24,10 @@ namespace {
 using industrial_bus::BoundedPriorityQueue;
 using industrial_bus::EnqueueDisposition;
 using industrial_bus::MessageClass;
+using industrial_bus::MessageType;
 using industrial_bus::OperationState;
 using industrial_bus::OperationStateMachine;
+using industrial_bus::QosPriority;
 using industrial_bus::QueueMetadata;
 namespace bus_core = industrial_bus::core;
 
@@ -53,6 +58,51 @@ private:
 QueueMetadata metadata(MessageClass message_class, std::string key = {}) {
     return QueueMetadata{industrial_bus::defaultPriority(message_class), message_class,
                          std::move(key)};
+}
+
+TEST(MessageSemanticsTest, MapsEveryClassToCanonicalTypeAndPriority) {
+    struct ExpectedSemantics {
+        MessageClass message_class;
+        MessageType message_type;
+        QosPriority priority;
+    };
+    constexpr std::array<ExpectedSemantics, 14> expected{{
+        {MessageClass::Reply, MessageType::Reply, QosPriority::Critical},
+        {MessageClass::Accepted, MessageType::Reply, QosPriority::Critical},
+        {MessageClass::FinalState, MessageType::Event, QosPriority::Critical},
+        {MessageClass::Error, MessageType::Error, QosPriority::Critical},
+        {MessageClass::Command, MessageType::Command, QosPriority::High},
+        {MessageClass::Request, MessageType::Request, QosPriority::High},
+        {MessageClass::Heartbeat, MessageType::Heartbeat, QosPriority::High},
+        {MessageClass::ServiceState, MessageType::System, QosPriority::High},
+        {MessageClass::Event, MessageType::Event, QosPriority::Normal},
+        {MessageClass::Progress, MessageType::Progress, QosPriority::Normal},
+        {MessageClass::ErrorLog, MessageType::Log, QosPriority::Normal},
+        {MessageClass::WarnLog, MessageType::Log, QosPriority::Normal},
+        {MessageClass::InfoLog, MessageType::Log, QosPriority::BestEffort},
+        {MessageClass::DebugLog, MessageType::Log, QosPriority::BestEffort},
+    }};
+
+    for (const auto& item : expected) {
+        EXPECT_EQ(industrial_bus::messageTypeFor(item.message_class),
+                  item.message_type);
+        EXPECT_EQ(industrial_bus::defaultPriority(item.message_class), item.priority);
+    }
+}
+
+TEST(MessageSemanticsTest, SeparatesProtocolErrorFromErrorLog) {
+    EXPECT_EQ(industrial_bus::messageTypeFor(MessageClass::Error),
+              MessageType::Error);
+    EXPECT_EQ(industrial_bus::messageTypeFor(MessageClass::ErrorLog),
+              MessageType::Log);
+    EXPECT_NE(MessageClass::Error, MessageClass::ErrorLog);
+}
+
+TEST(TopicTest, TwoFieldEventTopicDefaultsToOrdinaryEvent) {
+    constexpr industrial_bus::EventTopic<int> topic{"legacy.event", "test.Int"};
+    EXPECT_EQ(topic.name, "legacy.event");
+    EXPECT_EQ(topic.payload_type, "test.Int");
+    EXPECT_EQ(topic.message_class, MessageClass::Event);
 }
 
 TEST(ResultTest, CarriesValuesAndErrors) {
@@ -128,6 +178,10 @@ TEST(BoundedPriorityQueueTest, HonorsPriorityAndCapacity) {
     ASSERT_TRUE(item);
     EXPECT_EQ(*item, "event");
     EXPECT_FALSE(queue.tryDequeue());
+    const auto ordered_stats = queue.stats();
+    EXPECT_EQ(ordered_stats.enqueued, 3U);
+    EXPECT_EQ(ordered_stats.dequeued, 3U);
+    EXPECT_EQ(ordered_stats.high_watermark, 3U);
 
     BoundedPriorityQueue<int> high_only(1);
     EXPECT_EQ(high_only.tryEnqueue(1, metadata(MessageClass::Command)),
@@ -137,6 +191,7 @@ TEST(BoundedPriorityQueueTest, HonorsPriorityAndCapacity) {
     const auto high_item = high_only.tryDequeue();
     ASSERT_TRUE(high_item);
     EXPECT_EQ(*high_item, 1);
+    EXPECT_EQ(high_only.stats().rejected, 1U);
 }
 
 TEST(BoundedPriorityQueueTest, CoalescesProgressAndEvictsLowPriorityItems) {
@@ -179,10 +234,13 @@ TEST(BoundedPriorityQueueTest, ReportsCriticalOverflow) {
     EXPECT_EQ(queue.tryEnqueue(2, metadata(MessageClass::Reply)),
               EnqueueDisposition::CriticalOverflow);
     EXPECT_EQ(queue.stats().critical_overflow, 1U);
+    EXPECT_EQ(queue.stats().rejected, 1U);
 
     BoundedPriorityQueue<int> zero(0);
     EXPECT_EQ(zero.tryEnqueue(1, metadata(MessageClass::DebugLog)),
               EnqueueDisposition::Rejected);
+    EXPECT_EQ(zero.stats().dropped, 1U);
+    EXPECT_EQ(zero.stats().rejected, 1U);
 }
 
 TEST(IdempotencyJournalTest, PersistsDeduplicatesAndRecoversCommands) {

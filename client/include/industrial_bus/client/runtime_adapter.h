@@ -4,6 +4,7 @@
 #include "industrial_bus/destination.h"
 #include "industrial_bus/payload_codec.h"
 #include "industrial_bus/operation.h"
+#include "industrial_bus/qos.h"
 #include "industrial_bus/result.h"
 
 #include <chrono>
@@ -14,15 +15,8 @@
 
 namespace industrial_bus::client {
 
-enum class MessageKind {
-    Event,
-    Command,
-    Request,
-    Reply,
-    Operation,
-};
-
 enum class PayloadRole {
+    Unspecified,
     EventData,
     CommandData,
     RequestData,
@@ -30,10 +24,13 @@ enum class PayloadRole {
     CommandAck,
     ErrorDetail,
     OperationData,
+    SystemData,
 };
 
 struct OutboundMessage {
-    MessageKind kind{MessageKind::Event};
+    MessageType message_type{MessageType::Event};
+    QosPriority priority{QosPriority::Normal};
+    MessageClass message_class{MessageClass::Event};
     PayloadRole payload_role{PayloadRole::EventData};
     std::string message_id;
     std::string correlation_id;
@@ -50,7 +47,9 @@ struct OutboundMessage {
 };
 
 struct InboundMessage {
-    MessageKind kind{MessageKind::Event};
+    MessageType message_type{MessageType::Event};
+    QosPriority priority{QosPriority::Normal};
+    MessageClass message_class{MessageClass::Event};
     PayloadRole payload_role{PayloadRole::EventData};
     std::string message_id;
     std::string correlation_id;
@@ -68,7 +67,7 @@ struct InboundMessage {
 };
 
 // This is the narrow seam between the Client Runtime and protocol/transport.
-// Implementations own framing, handshake, retries and their I/O thread.
+// Implementations own framing, handshake, connection lifecycle and their I/O thread.
 class IRuntimeAdapter {
 public:
     using ReceiveHandler = std::function<void(InboundMessage)>;

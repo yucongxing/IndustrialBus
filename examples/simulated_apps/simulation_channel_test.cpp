@@ -30,6 +30,27 @@ TEST(SimulationChannelTest, BuildsOwnedChannelSpecificTopics) {
     EXPECT_EQ(topics.simulationFailed().name,
               "cmp.channel." + channel + ".simulation.failed");
     EXPECT_EQ(topics.applicationLog().name, "application.log." + channel);
+    EXPECT_EQ(topics.simulationProgress().message_class,
+              industrial_bus::MessageClass::Progress);
+    EXPECT_EQ(topics.simulationCompleted().message_class,
+              industrial_bus::MessageClass::FinalState);
+    EXPECT_EQ(topics.simulationFailed().message_class,
+              industrial_bus::MessageClass::FinalState);
+    EXPECT_EQ(topics.applicationLog().message_class,
+              industrial_bus::MessageClass::InfoLog);
+}
+
+TEST(SimulationChannelTest, MapsEveryRuntimeLogSeverityToSemanticQos) {
+    using industrial_bus::MessageClass;
+    using industrial_bus::examples::logMessageClass;
+    EXPECT_EQ(logMessageClass(industrial_bus::logging::v1::LOG_ERROR),
+              MessageClass::ErrorLog);
+    EXPECT_EQ(logMessageClass(industrial_bus::logging::v1::WARN),
+              MessageClass::WarnLog);
+    EXPECT_EQ(logMessageClass(industrial_bus::logging::v1::INFO),
+              MessageClass::InfoLog);
+    EXPECT_EQ(logMessageClass(industrial_bus::logging::v1::DEBUG),
+              MessageClass::DebugLog);
 }
 
 }  // namespace

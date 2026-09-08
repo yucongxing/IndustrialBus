@@ -107,7 +107,10 @@ private:
             event.set_message(std::move(record.message));
             event.set_thread_id(record.thread_id);
             event.set_sequence(++sequence_);
-            (void)bus->publish(topics_->applicationLog(), event);
+            industrial_bus::PublishOptions options;
+            options.message_class =
+                industrial_bus::examples::logMessageClass(event.level());
+            (void)bus->publish(topics_->applicationLog(), event, options);
         }
     }
 

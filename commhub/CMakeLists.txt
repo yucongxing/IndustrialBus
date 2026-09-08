@@ -12,8 +12,11 @@ target_compile_features(industrial_bus_commhub_core PUBLIC cxx_std_17)
 target_include_directories(industrial_bus_commhub_core
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../api/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/../core/include>
         $<INSTALL_INTERFACE:include>
 )
+target_link_libraries(industrial_bus_commhub_core PUBLIC IndustrialBus::Core)
 set_target_properties(industrial_bus_commhub_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
 if(BUILD_TESTING)

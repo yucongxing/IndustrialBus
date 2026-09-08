@@ -105,6 +105,7 @@ private:
             case MessageClass::InfoLog: return 1;
             case MessageClass::Progress: return 2;
             case MessageClass::Event: return 3;
+            case MessageClass::ErrorLog:
             case MessageClass::WarnLog: return 4;
             case MessageClass::Reply:
             case MessageClass::Accepted:
@@ -112,6 +113,7 @@ private:
             case MessageClass::Error:
             case MessageClass::Command:
             case MessageClass::Request:
+            case MessageClass::Heartbeat:
             case MessageClass::ServiceState:
                 return -1;
         }
@@ -124,8 +126,10 @@ private:
             case MessageClass::InfoLog: return 1;
             case MessageClass::Progress: return 2;
             case MessageClass::Event: return 3;
+            case MessageClass::ErrorLog:
             case MessageClass::WarnLog: return 4;
             case MessageClass::ServiceState: return 5;
+            case MessageClass::Heartbeat:
             case MessageClass::Command:
             case MessageClass::Request: return 6;
             case MessageClass::Reply:

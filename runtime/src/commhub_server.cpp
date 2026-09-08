@@ -1,6 +1,7 @@
 #include "industrial_bus/runtime/commhub_server.h"
 
 #include "industrial_bus/ids.h"
+#include "industrial_bus/qos.h"
 #include "industrial_bus/runtime/envelope_codec.h"
 
 #include "envelope.pb.h"
@@ -44,6 +45,14 @@ transport::ByteBuffer serializeReply(const envelope::MessageEnvelope& request,
     reply.set_message_type(envelope::REPLY);
     reply.set_payload_role(role);
     reply.set_payload_type(payload_type);
+    const auto message_class = role == envelope::COMMAND_ACK
+                                   ? MessageClass::Accepted
+                               : role == envelope::ERROR_DETAIL
+                                   ? MessageClass::Error
+                                   : MessageClass::Reply;
+    reply.set_priority(static_cast<std::uint32_t>(defaultPriority(message_class)));
+    (*reply.mutable_headers())["industrial_bus.message_class"] =
+        std::string(messageClassName(message_class));
     reply.set_timestamp_unix_ns(unixNowNs());
     reply.set_protocol_version(1);
     reply.set_schema_version(1);
@@ -68,6 +77,10 @@ transport::ByteBuffer serializeSystemMessage(
     message.set_message_type(envelope::SYSTEM);
     message.set_payload_role(envelope::SYSTEM_PAYLOAD);
     message.set_payload_type(payload_type);
+    message.set_priority(
+        static_cast<std::uint32_t>(defaultPriority(MessageClass::ServiceState)));
+    (*message.mutable_headers())["industrial_bus.message_class"] =
+        std::string(messageClassName(MessageClass::ServiceState));
     message.set_timestamp_unix_ns(unixNowNs());
     message.set_protocol_version(1);
     message.set_schema_version(1);
@@ -557,6 +570,34 @@ void CommHubServer::expireStaleSessions() {
     }
 }
 
+void CommHubServer::removePeer(const std::shared_ptr<Peer>& peer) {
+    std::unique_lock<std::mutex> lifecycle_lock(lifecycle_mutex_);
+    if (peer->session_id.empty()) {
+        return;
+    }
+    const auto session_id = peer->session_id;
+    const auto service = peer->service;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto found = sessions_.find(session_id);
+        if (found != sessions_.end() && found->second == peer) {
+            sessions_.erase(found);
+        }
+        peers_.erase(std::remove(peers_.begin(), peers_.end(), peer),
+                     peers_.end());
+    }
+    peer->session_id.clear();
+    core_.disconnect(session_id);
+    ++directory_revision_;
+    broadcastDirectoryChange(service, false, peer);
+    lifecycle_lock.unlock();
+    try {
+        peer->connection->close();
+    } catch (...) {
+        // The failed target is already isolated from Hub state.
+    }
+}
+
 void CommHubServer::drain(const std::vector<commhub::SessionId>& targets) {
     for (const auto& target : targets) {
         std::shared_ptr<Peer> peer;
@@ -574,6 +615,7 @@ void CommHubServer::drain(const std::vector<commhub::SessionId>& targets) {
             const auto sent = peer->connection->send(
                 transport::ByteView(message->wire_frame));
             if (!sent) {
+                removePeer(peer);
                 break;
             }
         }

@@ -6,6 +6,7 @@
 #include "industrial_bus/core/idempotency_journal.h"
 #include "industrial_bus/ids.h"
 
+#include "operation.pb.h"
 #include "system.pb.h"
 
 #if defined(INDUSTRIAL_BUS_HAS_LINUX_RUNTIME)
@@ -39,6 +40,14 @@ std::int64_t unixNowNs() {
     return std::chrono::duration_cast<std::chrono::nanoseconds>(
                std::chrono::system_clock::now().time_since_epoch())
         .count();
+}
+
+void applySemantics(client::OutboundMessage& message,
+                    MessageClass message_class,
+                    std::optional<MessageType> message_type = std::nullopt) {
+    message.message_class = message_class;
+    message.message_type = message_type.value_or(messageTypeFor(message_class));
+    message.priority = defaultPriority(message_class);
 }
 
 struct SubscriptionEntry {
@@ -259,7 +268,7 @@ public:
 
     void dispatch(const client::InboundMessage& message,
                   const std::shared_ptr<client::IRuntimeAdapter>& adapter) {
-        const bool is_command = message.kind == client::MessageKind::Command;
+        const bool is_command = message.message_type == MessageType::Command;
         std::shared_ptr<ServiceHandlerEntry> entry;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -343,6 +352,7 @@ public:
                 reply.payload_type = std::move(output_type);
                 reply.payload = std::move(result.value());
             } else {
+                applySemantics(reply, MessageClass::Error, MessageType::Reply);
                 reply.payload_role = client::PayloadRole::ErrorDetail;
                 reply.payload_type = "industrial_bus.system.v1.Error";
                 reply.error = std::make_shared<Error>(std::move(result.error()));
@@ -385,7 +395,7 @@ private:
 
     static client::OutboundMessage makeReply(const client::InboundMessage& message) {
         client::OutboundMessage reply;
-        reply.kind = client::MessageKind::Reply;
+        applySemantics(reply, MessageClass::Reply);
         reply.message_id = generateUuidV4();
         reply.correlation_id = message.correlation_id;
         reply.causation_id = message.message_id;
@@ -399,6 +409,7 @@ private:
                           const std::shared_ptr<client::IRuntimeAdapter>& adapter,
                           Error error) {
         auto reply = makeReply(message);
+        applySemantics(reply, MessageClass::Error, MessageType::Reply);
         if (!error.operation_id.empty()) {
             reply.operation_id = error.operation_id;
         }
@@ -434,6 +445,7 @@ private:
             return;
         }
         auto reply = makeReply(message);
+        applySemantics(reply, MessageClass::Accepted);
         reply.operation_id = record.operation_id;
         reply.payload_role = client::PayloadRole::CommandAck;
         reply.payload_type = "industrial_bus.system.v1.CommandAck";
@@ -608,17 +620,19 @@ public:
             if (!current || !current->accepting.load(std::memory_order_acquire)) {
                 return;
             }
-            if (message.kind == client::MessageKind::Event ||
-                message.kind == client::MessageKind::Operation) {
+            if (message.message_type == MessageType::Event ||
+                message.message_type == MessageType::Progress ||
+                message.message_type == MessageType::Log ||
+                message.message_type == MessageType::Error) {
                 current->subscriptions->dispatch(message);
                 return;
             }
-            if (message.kind == client::MessageKind::Command ||
-                message.kind == client::MessageKind::Request) {
+            if (message.message_type == MessageType::Command ||
+                message.message_type == MessageType::Request) {
                 current->service_handlers->dispatch(message, adapter);
                 return;
             }
-            if (message.kind != client::MessageKind::Reply) {
+            if (message.message_type != MessageType::Reply) {
                 return;
             }
             if (message.has_error) {
@@ -705,7 +719,8 @@ BusClient::~BusClient() {
 Result<void> BusClient::publishRaw(std::string topic,
                                    std::string payload_type,
                                    ByteBuffer payload,
-                                   PublishOptions options) {
+                                   PublishOptions options,
+                                   MessageClass topic_class) {
     if (topic.empty() || payload_type.empty()) {
         return Error::invalidArgument("event topic and payload type must not be empty");
     }
@@ -713,8 +728,19 @@ Result<void> BusClient::publishRaw(std::string topic,
         impl_->state->connection.load() != ConnectionState::Connected) {
         return Error::connectionLost("client is not connected");
     }
+    const auto message_class = options.message_class.value_or(topic_class);
+    if (!isPublishableMessageClass(message_class)) {
+        return Error::invalidArgument(
+            "publish requires an Event, Progress, FinalState or Log class");
+    }
+    if ((message_class == MessageClass::Progress ||
+         message_class == MessageClass::FinalState) &&
+        options.operation_id.empty()) {
+        return Error::invalidArgument(
+            "progress and final-state publication require an operation id");
+    }
     client::OutboundMessage message;
-    message.kind = client::MessageKind::Event;
+    applySemantics(message, message_class);
     message.payload_role = client::PayloadRole::EventData;
     message.message_id = generateUuidV4();
     message.correlation_id = options.correlation_id.empty() ? generateUuidV4()
@@ -786,7 +812,7 @@ void BusClient::commandRaw(Destination destination,
     }
 
     client::OutboundMessage message;
-    message.kind = client::MessageKind::Command;
+    applySemantics(message, MessageClass::Command);
     message.payload_role = client::PayloadRole::CommandData;
     message.message_id = generateUuidV4();
     message.correlation_id = options.correlation_id.empty() ? generateUuidV4()
@@ -832,7 +858,7 @@ void BusClient::requestRaw(Destination destination,
     }
 
     client::OutboundMessage message;
-    message.kind = client::MessageKind::Request;
+    applySemantics(message, MessageClass::Request);
     message.payload_role = client::PayloadRole::RequestData;
     message.message_id = generateUuidV4();
     message.correlation_id = generateUuidV4();
@@ -899,15 +925,68 @@ Result<void> BusClient::reportOperation(OperationUpdate update,
         return Error::connectionLost("client is not connected");
     }
     client::OutboundMessage message;
-    message.kind = client::MessageKind::Operation;
+    applySemantics(message, isTerminal(update.state) ? MessageClass::FinalState
+                                                     : MessageClass::Event);
     message.payload_role = client::PayloadRole::OperationData;
     message.message_id = generateUuidV4();
     message.correlation_id = correlation_id.empty() ? generateUuidV4()
                                                      : std::move(correlation_id);
     message.operation_id = update.operation_id;
     message.topic = "system.operation.event";
-    message.payload_type = "industrial_bus.system.v1.OperationEvent";
+    message.payload_type = operation::v1::OperationEvent::descriptor()->full_name();
     message.operation = std::make_shared<OperationUpdate>(std::move(update));
+    return impl_->adapter->send(std::move(message));
+}
+
+Result<void> BusClient::reportProgress(OperationUpdate update,
+                                       std::string correlation_id) {
+    if (update.operation_id.empty()) {
+        return Error::invalidArgument("progress update requires an operation id");
+    }
+    const auto valid = [](const std::optional<double>& value) {
+        return !value || (*value >= 0.0 && *value <= 1.0);
+    };
+    if (!valid(update.stage_progress) || !valid(update.overall_progress)) {
+        return Error::invalidArgument("progress must be between zero and one");
+    }
+    if (!impl_->state->accepting.load() ||
+        impl_->state->connection.load() != ConnectionState::Connected) {
+        return Error::connectionLost("client is not connected");
+    }
+
+    operation::v1::ProgressEvent progress;
+    progress.set_operation_id(update.operation_id);
+    progress.set_stage(std::move(update.stage));
+    if (update.stage_progress) {
+        progress.set_stage_progress(*update.stage_progress);
+    }
+    if (update.overall_progress) {
+        progress.set_overall_progress(*update.overall_progress);
+    }
+    if (update.current) {
+        progress.set_current(*update.current);
+    }
+    if (update.total) {
+        progress.set_total(*update.total);
+    }
+    progress.set_message(std::move(update.message));
+
+    ByteBuffer payload;
+    if (!PayloadCodec<operation::v1::ProgressEvent>::encode(progress, payload)) {
+        return Error::protocol("failed to serialize ProgressEvent");
+    }
+
+    client::OutboundMessage message;
+    applySemantics(message, MessageClass::Progress);
+    message.payload_role = client::PayloadRole::EventData;
+    message.message_id = generateUuidV4();
+    message.correlation_id = correlation_id.empty() ? generateUuidV4()
+                                                     : std::move(correlation_id);
+    message.operation_id = update.operation_id;
+    message.topic = "system.operation.progress";
+    message.payload_type =
+        operation::v1::ProgressEvent::descriptor()->full_name();
+    message.payload = std::move(payload);
     return impl_->adapter->send(std::move(message));
 }
 

@@ -2,7 +2,9 @@
 #include "industrial_bus/client/pending_request_table.h"
 #include "industrial_bus/client/runtime_adapter.h"
 #include "industrial_bus/core/idempotency_journal.h"
+#include "industrial_bus/qos.h"
 
+#include "operation.pb.h"
 #include "system.pb.h"
 
 #include <gtest/gtest.h>
@@ -114,12 +116,12 @@ public:
         return sent.size();
     }
 
-    std::size_t sentCount(client::MessageKind kind) const {
+    std::size_t sentCount(MessageType message_type) const {
         std::lock_guard<std::mutex> lock(mutex);
         return static_cast<std::size_t>(
             std::count_if(sent.begin(), sent.end(),
-                          [kind](const client::OutboundMessage& message) {
-                              return message.kind == kind;
+                          [message_type](const client::OutboundMessage& message) {
+                              return message.message_type == message_type;
                           }));
     }
 
@@ -213,8 +215,8 @@ TEST(BusClientTest,
     auto command = bus->command(Destination{"worker", {}}, command_topic,
                                 std::string("run"), command_options);
 
-    ASSERT_EQ(adapter->sentCount(client::MessageKind::Request), 1U);
-    ASSERT_EQ(adapter->sentCount(client::MessageKind::Command), 1U);
+    ASSERT_EQ(adapter->sentCount(MessageType::Request), 1U);
+    ASSERT_EQ(adapter->sentCount(MessageType::Command), 1U);
 
     adapter->emitConnection(ConnectionState::Disconnected, 1);
     EXPECT_EQ(bus->connectionState(), ConnectionState::Disconnected);
@@ -222,8 +224,8 @@ TEST(BusClientTest,
 
     EXPECT_EQ(bus->connectionState(), ConnectionState::Connected);
     EXPECT_EQ(adapter->subscribeCount("reconnect.event"), 2U);
-    EXPECT_EQ(adapter->sentCount(client::MessageKind::Request), 1U);
-    EXPECT_EQ(adapter->sentCount(client::MessageKind::Command), 1U);
+    EXPECT_EQ(adapter->sentCount(MessageType::Request), 1U);
+    EXPECT_EQ(adapter->sentCount(MessageType::Command), 1U);
 
     ASSERT_EQ(request.wait_for(std::chrono::milliseconds(100)),
               std::future_status::ready);
@@ -236,6 +238,186 @@ TEST(BusClientTest,
     const auto command_result = command.get();
     ASSERT_FALSE(command_result);
     EXPECT_EQ(command_result.error().category, ErrorCategory::HubRestarted);
+
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
+}
+
+TEST(BusClientTest, PublishesDefaultAndExplicitSemanticClasses) {
+    auto adapter = std::make_shared<FakeAdapter>();
+    ClientOptions options;
+    options.service_name = "semantic-publisher";
+    options.runtime_adapter = adapter;
+    auto connected = BusClient::connect(options);
+    ASSERT_TRUE(connected) << connected.error().message;
+    auto bus = connected.value();
+
+    const EventTopic<std::string> event_topic{"semantic.event", "test.String"};
+    ASSERT_TRUE(bus->publish(event_topic, std::string("event")));
+    auto message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Event);
+    EXPECT_EQ(message.priority, QosPriority::Normal);
+    EXPECT_EQ(message.message_class, MessageClass::Event);
+
+    const EventTopic<std::string> progress_topic{
+        "semantic.progress", "test.String", MessageClass::Progress};
+    PublishOptions progress_options;
+    progress_options.operation_id = "operation-1";
+    ASSERT_TRUE(bus->publish(progress_topic, std::string("progress"),
+                             progress_options));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Progress);
+    EXPECT_EQ(message.priority, QosPriority::Normal);
+    EXPECT_EQ(message.message_class, MessageClass::Progress);
+    EXPECT_EQ(message.operation_id, "operation-1");
+
+    const EventTopic<std::string> log_topic{
+        "semantic.log", "test.String", MessageClass::WarnLog};
+    ASSERT_TRUE(bus->publish(log_topic, std::string("warning")));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Log);
+    EXPECT_EQ(message.priority, QosPriority::Normal);
+    EXPECT_EQ(message.message_class, MessageClass::WarnLog);
+
+    PublishOptions record_override;
+    record_override.message_class = MessageClass::InfoLog;
+    ASSERT_TRUE(bus->publish(log_topic, std::string("info"), record_override));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Log);
+    EXPECT_EQ(message.priority, QosPriority::BestEffort);
+    EXPECT_EQ(message.message_class, MessageClass::InfoLog);
+
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
+}
+
+TEST(BusClientTest, AssignsCanonicalPrioritiesToDirectedMessages) {
+    auto adapter = std::make_shared<FakeAdapter>();
+    ClientOptions options;
+    options.service_name = "directed-priority-client";
+    options.runtime_adapter = adapter;
+    auto connected = BusClient::connect(options);
+    ASSERT_TRUE(connected) << connected.error().message;
+    auto bus = connected.value();
+
+    const CommandTopic<std::string, system::v1::CommandAck> command_topic{
+        "priority.command", "test.StringCommand",
+        "industrial_bus.system.v1.CommandAck"};
+    CommandOptions command_options;
+    command_options.idempotency_key = "priority-command";
+    auto command = bus->command(Destination{"worker", {}}, command_topic,
+                                std::string("run"), command_options);
+    auto message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Command);
+    EXPECT_EQ(message.priority, QosPriority::High);
+    EXPECT_EQ(message.message_class, MessageClass::Command);
+
+    const RequestTopic<std::string, std::string> request_topic{
+        "priority.request", "test.StringRequest", "test.StringReply"};
+    auto request = bus->request(Destination{"worker", {}}, request_topic,
+                                std::string("question"),
+                                std::chrono::seconds(5));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Request);
+    EXPECT_EQ(message.priority, QosPriority::High);
+    EXPECT_EQ(message.message_class, MessageClass::Request);
+
+    auto executor = std::make_shared<ManualExecutor>();
+    auto handler = bus->handleRequest(
+        request_topic,
+        [](const std::string&, const MessageContext&) -> Result<std::string> {
+            return std::string("answer");
+        },
+        executor);
+    ASSERT_TRUE(handler);
+    client::InboundMessage incoming;
+    incoming.message_type = MessageType::Request;
+    incoming.priority = QosPriority::High;
+    incoming.message_class = MessageClass::Request;
+    incoming.message_id = "incoming-priority-request";
+    incoming.source_service = "caller";
+    incoming.source_instance = "caller-1";
+    incoming.topic = "priority.request";
+    incoming.payload_type = "test.StringRequest";
+    ASSERT_TRUE(PayloadCodec<std::string>::encode("question", incoming.payload));
+    adapter->deliver(std::move(incoming));
+    executor->runAll();
+
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Reply);
+    EXPECT_EQ(message.priority, QosPriority::Critical);
+    EXPECT_EQ(message.message_class, MessageClass::Reply);
+
+    EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
+    EXPECT_EQ(command.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::ready);
+    EXPECT_EQ(request.wait_for(std::chrono::milliseconds(100)),
+              std::future_status::ready);
+}
+
+TEST(BusClientTest, ReportsOperationWithCanonicalPayloadType) {
+    auto adapter = std::make_shared<FakeAdapter>();
+    ClientOptions options;
+    options.service_name = "operation-reporter";
+    options.runtime_adapter = adapter;
+    auto connected = BusClient::connect(options);
+    ASSERT_TRUE(connected) << connected.error().message;
+    auto bus = connected.value();
+
+    OperationUpdate update;
+    update.operation_id = "operation-1";
+    update.operation_type = "test-operation";
+    update.state = OperationState::Running;
+
+    const auto reported = bus->reportOperation(std::move(update));
+    ASSERT_TRUE(reported) << reported.error().message;
+    auto message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Event);
+    EXPECT_EQ(message.priority, QosPriority::Normal);
+    EXPECT_EQ(message.message_class, MessageClass::Event);
+    EXPECT_EQ(message.topic, "system.operation.event");
+    EXPECT_EQ(message.payload_type,
+              operation::v1::OperationEvent::descriptor()->full_name());
+
+    OperationUpdate completed;
+    completed.operation_id = "operation-1";
+    completed.operation_type = "test-operation";
+    completed.state = OperationState::Completed;
+    ASSERT_TRUE(bus->reportOperation(std::move(completed)));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Event);
+    EXPECT_EQ(message.priority, QosPriority::Critical);
+    EXPECT_EQ(message.message_class, MessageClass::FinalState);
+    EXPECT_EQ(message.topic, "system.operation.event");
+
+    OperationUpdate progress;
+    progress.operation_id = "operation-1";
+    progress.operation_type = "test-operation";
+    progress.state = OperationState::Running;
+    progress.stage = "calculating";
+    progress.stage_progress = 0.25;
+    progress.overall_progress = 0.5;
+    progress.current = 3;
+    progress.total = 12;
+    progress.message = "three complete";
+    ASSERT_TRUE(bus->reportProgress(std::move(progress), "progress-correlation"));
+    message = adapter->lastSent();
+    EXPECT_EQ(message.message_type, MessageType::Progress);
+    EXPECT_EQ(message.priority, QosPriority::Normal);
+    EXPECT_EQ(message.message_class, MessageClass::Progress);
+    EXPECT_EQ(message.topic, "system.operation.progress");
+    EXPECT_EQ(message.payload_type,
+              operation::v1::ProgressEvent::descriptor()->full_name());
+    EXPECT_EQ(message.operation_id, "operation-1");
+
+    operation::v1::ProgressEvent wire_progress;
+    ASSERT_TRUE(PayloadCodec<operation::v1::ProgressEvent>::decode(
+        message.payload, wire_progress));
+    EXPECT_EQ(wire_progress.operation_id(), message.operation_id);
+    EXPECT_EQ(wire_progress.stage(), "calculating");
+    EXPECT_DOUBLE_EQ(wire_progress.stage_progress(), 0.25);
+    EXPECT_DOUBLE_EQ(wire_progress.overall_progress(), 0.5);
+    EXPECT_EQ(wire_progress.current(), 3U);
+    EXPECT_EQ(wire_progress.total(), 12U);
+    EXPECT_EQ(wire_progress.message(), "three complete");
 
     EXPECT_TRUE(bus->shutdown(std::chrono::milliseconds(10)));
 }
@@ -273,7 +455,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
         event_topic, [&](const std::string&) { ++callbacks; }, executor);
     EXPECT_TRUE(adapter->subscribeCount("test.event") == 1);
     client::InboundMessage event;
-    event.kind = client::MessageKind::Event;
+    event.message_type = MessageType::Event;
     event.topic = "test.event";
     event.payload_type = "test.String";
     PayloadCodec<std::string>::encode("payload", event.payload);
@@ -325,7 +507,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
                                         std::chrono::milliseconds(100));
     const auto request = adapter->lastSent();
     client::InboundMessage reply;
-    reply.kind = client::MessageKind::Reply;
+    reply.message_type = MessageType::Reply;
     reply.causation_id = request.message_id;
     reply.payload_type = "test.StringReply";
     PayloadCodec<std::string>::encode("answer", reply.payload);
@@ -362,7 +544,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
                                        std::string("run"), command_options);
     const auto command = adapter->lastSent();
     client::InboundMessage ack;
-    ack.kind = client::MessageKind::Reply;
+    ack.message_type = MessageType::Reply;
     ack.causation_id = command.message_id;
     ack.payload_type = "industrial_bus.system.v1.CommandAck";
     system::v1::CommandAck wire_ack;
@@ -393,7 +575,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
     EXPECT_TRUE(request_handler);
 
     client::InboundMessage incoming_request;
-    incoming_request.kind = client::MessageKind::Request;
+    incoming_request.message_type = MessageType::Request;
     incoming_request.message_id = "incoming-request-1";
     incoming_request.correlation_id = "correlation-1";
     incoming_request.operation_id = "operation-1";
@@ -408,7 +590,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
     executor->runAll();
     EXPECT_TRUE(request_handler_called);
     const auto response_reply = adapter->lastSent();
-    EXPECT_TRUE(response_reply.kind == client::MessageKind::Reply);
+    EXPECT_TRUE(response_reply.message_type == MessageType::Reply);
     EXPECT_TRUE(response_reply.payload_role == client::PayloadRole::ResponseData);
     EXPECT_TRUE(response_reply.causation_id == "incoming-request-1");
     EXPECT_TRUE(response_reply.correlation_id == "correlation-1");
@@ -436,7 +618,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
         executor);
     EXPECT_TRUE(command_handler);
     client::InboundMessage incoming_command;
-    incoming_command.kind = client::MessageKind::Command;
+    incoming_command.message_type = MessageType::Command;
     incoming_command.message_id = "incoming-command-1";
     incoming_command.correlation_id = "correlation-2";
     incoming_command.source_service = "caller";
@@ -513,7 +695,7 @@ TEST(BusClientTest, SupportsLifecycleMessagingAndIdempotentHandlers) {
     EXPECT_TRUE(protobuf_command_handler);
     const auto records_before_malformed = journal->liveRecordCount();
     client::InboundMessage malformed_command;
-    malformed_command.kind = client::MessageKind::Command;
+    malformed_command.message_type = MessageType::Command;
     malformed_command.message_id = "malformed-command";
     malformed_command.source_service = "caller";
     malformed_command.source_instance = "caller-1";

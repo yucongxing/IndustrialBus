@@ -51,6 +51,7 @@ private:
         const std::shared_ptr<Peer>& excluded = {});
     void maintenanceLoop();
     void expireStaleSessions();
+    void removePeer(const std::shared_ptr<Peer>& peer);
     void drain(const std::vector<commhub::SessionId>& targets);
     void sendRouteError(const std::shared_ptr<Peer>& peer,
                         const transport::ByteBuffer& request,

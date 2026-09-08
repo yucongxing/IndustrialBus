@@ -1,6 +1,7 @@
 #include "industrial_bus/runtime/transport_runtime_adapter.h"
 
 #include "industrial_bus/ids.h"
+#include "industrial_bus/qos.h"
 #include "industrial_bus/runtime/envelope_codec.h"
 
 #include "envelope.pb.h"
@@ -35,6 +36,12 @@ transport::ByteBuffer serializeSystemEnvelope(
     wire.set_message_type(message_type);
     wire.set_payload_role(envelope::SYSTEM_PAYLOAD);
     wire.set_payload_type(payload_type);
+    const auto message_class = message_type == envelope::HEARTBEAT
+                                   ? MessageClass::Heartbeat
+                                   : MessageClass::ServiceState;
+    wire.set_priority(static_cast<std::uint32_t>(defaultPriority(message_class)));
+    (*wire.mutable_headers())["industrial_bus.message_class"] =
+        std::string(messageClassName(message_class));
     wire.set_protocol_version(1);
     wire.set_schema_version(1);
     wire.set_max_hops(1);

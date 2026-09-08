@@ -1,5 +1,7 @@
 #pragma once
 
+#include "industrial_bus/qos.h"
+
 #include <chrono>
 #include <cstdint>
 #include <optional>
@@ -90,6 +92,8 @@ struct RouteMessage {
     std::string payload_type;
     std::string idempotency_key;
     MessageKind kind{MessageKind::event};
+    ::industrial_bus::MessageClass message_class{
+        ::industrial_bus::MessageClass::Event};
     PayloadRole payload_role{PayloadRole::unspecified};
     SelectionPolicy selection_policy{SelectionPolicy::unspecified};
     std::uint32_t priority{2};
